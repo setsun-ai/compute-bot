@@ -1,0 +1,39 @@
+# Pushing a version tag (git tag v1.2.3 && git push origin v1.2.3) publishes a GitHub release: the tag must match
+# VERSION in compute_bot/__init__.py, lint + core tests must pass, and the notes are the "## 1.2.3" section of
+# CHANGELOG.md. The bot's /update installs the latest release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m pytest -q tests --ignore=tests/recipes
+      - name: The tag matches VERSION
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "$(python -m compute_bot --version)" = "$version" || { echo "compute_bot is not $version"; exit 1; }
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '/^## / { if (found) exit; if ($2 == v) { found = 1; next } } found' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $version"; exit 1; }
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag

@@ -1,0 +1,36 @@
+[Unit]
+Description=compute-bot: runner zadań (jedno naraz, najniższy priorytet)
+After=network-online.target
+
+[Service]
+User=compute
+Group=compute
+# No token here: jobs are the owner's scripts and never need it.
+EnvironmentFile=/etc/compute-runner.env
+Environment=COMPUTE_HOME=/var/lib/compute-bot
+Environment=COMPUTE_PYTHON=/var/lib/compute-bot/env/bin/python
+Environment=MAMBA_ROOT_PREFIX=/var/lib/compute-bot/mamba
+Environment=PATH=/opt/compute-bot/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/bin/python3 /opt/compute-bot/app/launch.py runner
+Restart=always
+RestartSec=15
+UMask=0077
+
+# Game servers and the other bots on this laptop always come first.
+Nice=19
+CPUSchedulingPolicy=batch
+IOSchedulingClass=idle
+MemoryHigh=80%
+MemoryMax=90%
+# A stopped runner takes its job with it; on start it runs it again (md_step resumes from the checkpoint).
+KillMode=control-group
+TimeoutStopSec=30
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/compute-bot
+
+[Install]
+WantedBy=multi-user.target

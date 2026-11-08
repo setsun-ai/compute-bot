@@ -1,0 +1,25 @@
+[Unit]
+Description=compute-bot: Telegram, kolejka obliczeń
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=compute
+Group=compute
+EnvironmentFile=/etc/compute-bot.env
+Environment=COMPUTE_HOME=/var/lib/compute-bot
+ExecStart=/usr/bin/python3 /opt/compute-bot/app/launch.py bot
+Restart=always
+RestartSec=10
+UMask=0077
+Nice=5
+MemoryMax=400M
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/compute-bot
+
+[Install]
+WantedBy=multi-user.target

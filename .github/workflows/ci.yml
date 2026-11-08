@@ -1,0 +1,51 @@
+# Lint + tests. No secrets: the tests never talk to Telegram.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    # The bot and the runner: standard library only, on the Pythons a laptop's distro may have.
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r requirements-dev.txt
+      - run: python -m ruff check .
+      - run: python -m pytest -q tests --ignore=tests/recipes
+      - run: python -m compute_bot --selftest
+      - run: bash -n deploy/install.sh compute_bot/bin/md_step
+
+  recipes:
+    # The recipes in the same conda environment the laptop gets (slow tests too: GROMACS, Vina, RCSB).
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: deploy/environment.yml
+          cache-environment: true
+      - run: python -m pip install pytest
+      - run: python -m pytest -q tests/recipes

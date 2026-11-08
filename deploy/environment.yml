@@ -1,0 +1,35 @@
+# Everything a job can use on the laptop. CPU only: the Vostro has no GPU.
+name: compute
+channels: [conda-forge, bioconda]
+dependencies:
+  - python=3.12
+  # molecular dynamics
+  - gromacs
+  - openmm
+  - pdbfixer
+  - mdanalysis
+  # chemoinformatics, QSAR, quantum chemistry, docking
+  - rdkit
+  - openbabel
+  - mopac
+  - vina
+  - gemmi
+  # data, statistics, machine learning
+  - numpy
+  - scipy
+  - pandas
+  - openpyxl
+  - scikit-learn
+  - statsmodels
+  - xgboost
+  - matplotlib
+  - seaborn
+  # omics
+  - pyteomics
+  # notebooks
+  - nbconvert
+  - ipykernel
+  - pip
+  - pip:
+      - mordredcommunity
+      - meeko>=0.7  # conda-forge only has 0.5, which breaks on current RDKit

@@ -1,0 +1,25 @@
+#!/bin/bash
+# One GROMACS stage that survives a restart: a finished stage is skipped, an interrupted one resumes from its checkpoint.
+#   md_step NAME [grompp options...]   e.g.  md_step nvt -f nvt.mdp -c em.gro -r em.gro -p topol.top
+# Without grompp options NAME.tpr must already exist (a job that is just a .tpr file).
+# Extra mdrun options: MD_MDRUN_ARGS="-pin on"; grompp warnings allowed: MD_MAXWARN=1.
+set -euo pipefail
+name=${1:?użycie: md_step NAZWA [opcje grompp]}
+shift
+threads=${COMPUTE_THREADS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu)}
+
+if [ -f "$name.gro" ] && [ -f "$name.log" ] && grep -q "Finished mdrun" "$name.log"; then
+  echo "md_step: $name już policzony, pomijam"
+  exit 0
+fi
+if [ ! -f "$name.tpr" ]; then
+  [ $# -gt 0 ] || { echo "md_step: brak $name.tpr i opcji grompp" >&2; exit 2; }
+  gmx grompp -o "$name.tpr" -maxwarn "${MD_MAXWARN:-0}" "$@"
+fi
+resume=()
+if [ -f "$name.cpt" ]; then
+  echo "md_step: wznawiam $name z checkpointu"
+  resume=(-cpi "$name.cpt")
+fi
+# shellcheck disable=SC2086
+gmx mdrun -v -deffnm "$name" -nt "$threads" -cpt 5 ${resume[@]+"${resume[@]}"} ${MD_MDRUN_ARGS:-}
