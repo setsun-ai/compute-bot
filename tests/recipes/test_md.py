@@ -186,6 +186,17 @@ def test_parse_topology_and_box():
     assert box["volume"] == pytest.approx(4.39229 * 4.39229 * 3.10582)
 
 
+def test_fatal_error_names_the_grompp_warning():
+    text = ("Generating 1-4 interactions: fudge = 0.5\nWARNING 1 [file md.mdp]:\n"
+            "  For proper integration of the Nose-Hoover thermostat, tau-t (0.1) should\n"
+            "  be at least 20 times larger than nsttcouple*dt (0.1)\nNumber of degrees of freedom\n"
+            "-------------------------------------------------------\nProgram:     gmx grompp\n\n"
+            "Fatal error:\nToo many warnings (1).\nIf you are sure all warnings are harmless, use the -maxwarn "
+            "option.\n\nFor more information and tips for troubleshooting\n")
+    msg = G.fatal_error(text)
+    assert "Nose-Hoover" in msg and "Too many warnings" in msg
+
+
 def test_grompp_charge():
     assert G.parse_net_charge("  System has non-zero total charge: 1.000000\n") == pytest.approx(1.0)
     assert G.parse_net_charge("nothing to see") == 0.0
@@ -299,7 +310,11 @@ elif tool in ("editconf", "solvate"):
     open(opt("-o"), "w").write(GRO)
     if tool == "solvate":
         open(opt("-p"), "a").write("SOL 100\n")
+elif tool == "hbond":
+    open(opt("-o", "hbond.ndx"), "w").write("ndx")  # real gmx hbond writes this even when not asked
+    open(opt("-num"), "w").write("xvg")
 elif tool == "grompp":
+    open(opt("-po", "mdout.mdp"), "w").write("mdout")
     open(opt("-o"), "w").write("tpr")
     sys.stderr.write("System has non-zero total charge: 1.000000\n")
 elif tool == "genion":
@@ -307,6 +322,17 @@ elif tool == "genion":
     open(opt("-o"), "w").write(GRO)
     top = open(opt("-p")).read().replace("SOL 100", "SOL 95\nNA 2\nCL 3")
     open(opt("-p"), "w").write(top)
+elif tool == "convert-tpr":
+    open(opt("-o"), "w").write("tpr-extended")
+elif tool == "mdrun" and "-noappend" in rest:
+    import glob
+    name = opt("-deffnm")
+    part = f"{name}.part{2 + len(glob.glob(name + '.part*.log')):04d}"
+    for ext in (".xtc", ".edr"):
+        open(part + ext, "w").write("x")
+    open(part + ".gro", "w").write(GRO)
+    open(part + ".log", "w").write("Performance:   7.5   3.2\nFinished mdrun on rank 0\n")
+    open(name + ".cpt", "w").write("cpt")
 elif tool == "mdrun":
     name = opt("-deffnm")
     if "-cpi" not in rest:
@@ -388,6 +414,220 @@ def test_missing_input_is_a_readable_error(tmp_path):
                           text=True, timeout=120)
     assert proc.returncode != 0
     assert proc.stderr.strip().splitlines()[-1].startswith("ERROR: ")
+
+
+# --- mdp overrides --------------------------------------------------------------------------------------------------
+
+def test_parse_mdp_overrides():
+    assert M.parse_overrides("") == []
+    assert M.parse_overrides("nstxout-compressed=500; tcoupl = nose-hoover;") == [
+        ("nstxout-compressed", "500"), ("tcoupl", "nose-hoover")]
+    assert M.parse_overrides("tc-grps=Protein Non-Protein") == [("tc-grps", "Protein Non-Protein")]
+    for bad in ("foo", "=1", "a b=1", "x=", "nsteps=1=2", "1abc=3"):
+        with pytest.raises(G.RecipeError, match="mdp"):
+            M.parse_overrides(bad)
+
+
+def test_overrides_change_only_production():
+    p = params(mdp="nstxout_compressed=500;tcoupl=nose-hoover;nstcalcenergy=50;cos-acceleration=0.1")
+    plan = M.plan_stages(p)
+    over = M.parse_overrides(p["mdp"])
+    texts = {s.name: M.make_mdp(s, p["ff"], p["seed"], over if s.name == "md" else None) for s in plan}
+    md = M.parse_mdp(texts["md"])
+    assert md["tcoupl"] == "nose-hoover" and md["nstxout-compressed"] == "500" and md["nstcalcenergy"] == "50"
+    assert md["cos-acceleration"] == "0.1"
+    assert "nstxout_compressed" not in md  # replaced, not duplicated
+    assert texts["md"].count("nstxout") == 1
+    assert M.parse_mdp(texts["npt"])["tcoupl"] == "V-rescale"
+
+
+def test_check_params_engine_rules():
+    from compute_bot.recipes.md import pipeline as P
+    assert P.check_params(params()) == []
+    with pytest.raises(G.RecipeError, match="mdp"):
+        P.check_params(params(engine="openmm", mdp="tcoupl=nose-hoover"))
+    with pytest.raises(G.RecipeError, match="OpenMM"):
+        P.check_params(params(engine="openmm", ff="gromos54a7"))
+    with pytest.raises(G.RecipeError, match="OpenMM"):
+        P.check_params(params(engine="openmm", ff="oplsaa"))
+    notes = P.check_params(params(engine="openmm", ff="charmm27"))
+    assert any("CHARMM36" in n for n in notes)
+    notes = P.check_params(params(extend_ns=1, mdp="tcoupl=nose-hoover"))
+    assert any("mdp" in n for n in notes)
+
+
+def test_openmm_forcefield_mapping():
+    from compute_bot.recipes.md import omm as O
+    files, model, _ = O.openmm_forcefield("amber99sb-ildn", "auto")
+    assert files == ["amber99sbildn.xml", "tip3p.xml"] and model == "tip3p"
+    files, model, notes = O.openmm_forcefield("charmm27", "auto")
+    assert files == ["charmm36.xml", "charmm36/water.xml"] and model == "tip3p" and "CHARMM36" in notes[0]
+    files, model, notes = O.openmm_forcefield("amber03", "tip4p")
+    assert files == ["amber03.xml", "tip4pew.xml"] and model == "tip4pew" and "TIP4P-Ew" in notes[0]
+    with pytest.raises(G.RecipeError, match="spc"):
+        O.openmm_forcefield("amber99sb", "spc")
+
+
+# --- OpenMM bookkeeping ---------------------------------------------------------------------------------------------
+
+def test_openmm_frames_kept_after_restart():
+    from compute_bot.recipes.md import omm as O
+    # part 1 started at 0 and got to 1500 before a crash, last checkpoint at 1200; part 2 resumed at 1200
+    kept = O.kept_frames([0, 1200], [15, 10], nst=100, end=2000)
+    assert kept[0] == list(range(100, 1201, 100))
+    assert kept[1] == list(range(1300, 2001, 100))
+    # an extension starts mid-interval: frames are absolute multiples of nst
+    assert O.kept_frames([2050], [3], nst=100, end=2400) == [[2100, 2200, 2300]]
+
+
+def test_openmm_box_matches_editconf():
+    import numpy as np
+
+    from compute_bot.recipes.md import omm as O
+    for shape, volume in (("cubic", 1.0), ("dodecahedron", 0.5 * 2 ** 0.5), ("octahedron", 4 / 9 * 3 ** 0.5)):
+        v = np.array(O.box_vectors(shape, 4.0))
+        assert np.linalg.norm(v, axis=1) == pytest.approx([4.0, 4.0, 4.0])
+        assert abs(np.linalg.det(v)) == pytest.approx(volume * 64)
+    pts = np.array([[0, 0, 0], [1, 0, 0], [0, 2, 0], [0, 0, 0.5]] + [[0.1, 0.1, 0.1]] * 60)
+    assert O.diameter(pts) == pytest.approx(5 ** 0.5)
+
+
+def test_parse_state_data_csv():
+    from compute_bot.recipes.md import omm as O
+    text = ('#"Step","Time (ps)","Potential Energy (kJ/mole)","Temperature (K)","Box Volume (nm^3)",'
+            '"Density (g/mL)"\n100,0.2,-80000.5,299.1,60.1,1.012\n200,0.4,-80010.0,301.0,60.0,1.013\n')
+    cols = O.parse_state_csv(text)
+    assert cols["Step"].tolist() == [100, 200]
+    assert cols["Potential"].tolist() == [-80000.5, -80010.0]
+    assert cols["Density"].tolist() == pytest.approx([1012.0, 1013.0])  # kg/m3 like gmx energy
+    assert cols["Volume"].tolist() == [60.1, 60.0] and "Temperature" in cols
+
+
+def test_progress_counts_from_first_step():
+    stage = M.Stage("md_ext1", "przedłużenie 1", 1000, 300.0, first_step=2000)
+    prog = G.Progress([stage], every=0, now=iter([0.0, 10.0]).__next__)
+    prog.start(stage)
+    assert prog.update({"step": 2000}) .startswith("PROGRESS: etap 1/1: przedłużenie 1 0%")
+    assert "50%" in prog.update({"step": 2500})
+
+
+# --- extension of a finished job ------------------------------------------------------------------------------------
+
+def test_claim_extension_segment(tmp_path):
+    from compute_bot.recipes.md import extend as X
+    d = tmp_path / "gromacs"
+    d.mkdir()
+    assert X.claim_segment(d, tmp_path / "w1") == ("md_ext1", 1)
+    assert X.claim_segment(d, tmp_path / "w1") == ("md_ext1", 1)  # same job: same segment
+    (d / "md_ext1.done.json").write_text("{}")
+    (d / "md_ext2.part0002.log").write_text("left over by an unfinished parent")
+    assert X.claim_segment(d, tmp_path / "w2") == ("md_ext2", 2)  # a child job: next segment
+    assert not (d / "md_ext2.part0002.log").exists()
+    assert X.production_segments(d) == ["md", "md_ext1"]
+
+
+def _finished_gromacs_job(work):
+    gdir = work / "gromacs"
+    gdir.mkdir(parents=True)
+    for name in ("md.tpr", "md.cpt", "md.xtc", "md.edr", "md.gro", "topol.top"):
+        (gdir / name).write_text(name)
+    (gdir / "md.log").write_text("Performance:   7.5   3.2\nFinished mdrun on rank 0\n")
+    (gdir / "md.mdp").write_text("nsteps = 2000\nref_t = 300 300\npcoupl = C-rescale\n")
+    (gdir / "analysis.log").write_text("old log\n")
+    (work / "summary.txt").write_text("parent summary\n")
+    return gdir
+
+
+def _link_tree(src: Path, dst: Path):
+    """What the bot does for an extension job: every file of work/ hard-linked into the new work dir."""
+    for path in src.rglob("*"):
+        target = dst / path.relative_to(src)
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.link(path, target)
+
+
+def _snapshot(root: Path) -> dict:
+    return {str(p.relative_to(root)): p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def test_gromacs_extension_call_sequence_and_parent_untouched(tmp_path, fake_gmx):
+    from compute_bot.recipes.md import extend as X
+    parent = tmp_path / "parent"
+    _finished_gromacs_job(parent)
+    before = _snapshot(parent)
+    child = tmp_path / "child"
+    _link_tree(parent, child)
+    gdir = child / "gromacs"
+    env = G.gmx_env(2)
+    p = params(extend_ns=1)
+    seg = X.extend_gromacs(child, gdir, p, env)
+    assert seg == "md_ext1"
+    calls = _calls(fake_gmx)
+    assert calls[0].startswith("convert-tpr -s md.tpr -extend 1000 -o ")
+    assert calls[1].startswith("mdrun") and "-deffnm md_ext1" in calls[1] and "-cpi md.cpt" in calls[1]
+    assert "-noappend" in calls[1] and "-nt 2" in calls[1] and "-s md_ext1.tpr" in calls[1]
+    assert (gdir / "md_ext1.done.json").exists()
+    assert X.production_segments(gdir) == ["md", "md_ext1"]
+    # rerun: nothing to do
+    X.extend_gromacs(child, gdir, p, env)
+    assert _calls(fake_gmx) == calls
+    # interrupted extension: resumes from its own checkpoint, still without appending
+    (gdir / "md_ext1.done.json").unlink()
+    (gdir / "md_ext1.part0002.log").write_text("step 10\n")
+    X.extend_gromacs(child, gdir, p, env)
+    last = _calls(fake_gmx)[-1]
+    assert last.startswith("mdrun") and "-cpi md_ext1.cpt" in last and "-noappend" in last
+    assert len(_calls(fake_gmx)) == len(calls) + 1  # the tpr is not rebuilt
+    # a grandchild extends the extension
+    grand = tmp_path / "grand"
+    _link_tree(child, grand)
+    X.extend_gromacs(grand, grand / "gromacs", p, env)
+    convert, mdrun = _calls(fake_gmx)[-2:]
+    assert convert.startswith("convert-tpr -s md_ext1.tpr -extend 1000")
+    assert "-deffnm md_ext2" in mdrun and "-cpi md_ext1.cpt" in mdrun
+    assert _snapshot(parent) == before  # the parent job's files never change
+
+
+def test_extension_needs_finished_production(tmp_path, fake_gmx):
+    from compute_bot.recipes.md import extend as X
+    gdir = tmp_path / "gromacs"
+    gdir.mkdir()
+    with pytest.raises(G.RecipeError, match="extend_ns"):
+        X.extend_gromacs(tmp_path, gdir, params(extend_ns=1), G.gmx_env(2))
+
+
+def test_gmx_implicit_outputs_do_not_touch_linked_files(tmp_path, fake_gmx):
+    parent, child = tmp_path / "p", tmp_path / "c"
+    parent.mkdir()
+    child.mkdir()
+    for name in ("hbond.ndx", "mdout.mdp", "hb.xvg"):
+        (parent / name).write_text("parent")
+        os.link(parent / name, child / name)
+    G.run_gmx(["hbond", "-s", "md.tpr", "-num", "hb.xvg"], child, G.gmx_env(1))
+    G.run_gmx(["grompp", "-f", "x.mdp", "-o", "x.tpr"], child, G.gmx_env(1))
+    assert all((parent / n).read_text() == "parent" for n in ("hbond.ndx", "mdout.mdp", "hb.xvg"))
+
+
+def test_safe_writers_break_hard_links(tmp_path):
+    a = tmp_path / "a.txt"
+    a.write_text("parent")
+    b = tmp_path / "b.txt"
+    os.link(a, b)
+    G.write_text(b, "child")
+    assert a.read_text() == "parent" and b.read_text() == "child"
+    c = tmp_path / "c.log"
+    os.link(a, c)
+    G.own(c)
+    with open(c, "a") as fh:
+        fh.write(" more")
+    assert a.read_text() == "parent" and c.read_text() == "parent more"
+    d = tmp_path / "d.png"
+    os.link(a, d)
+    G.fresh_output(d).write_bytes(b"png")
+    assert a.read_text() == "parent"
 
 
 # --- slow: real GROMACS run on trp-cage -----------------------------------------------------------------------------
@@ -476,3 +716,133 @@ def test_end_to_end_1l2y_with_interrupt_and_resume(tmp_path):
     print(textwrap.dedent(f"""
         timing: interrupted run {t_first:.0f} s, resumed run + analysis {t_second:.0f} s, no-op rerun {t_third:.0f} s
     """))
+
+
+def _hashes(root: Path) -> dict:
+    import hashlib
+    return {str(p.relative_to(root)): hashlib.sha1(p.read_bytes()).hexdigest()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+def _child_job(parent: Path, child: Path, **changes) -> dict:
+    _link_tree(parent, child)
+    p = dict(json.loads((parent / "params.json").read_text()), **changes)
+    (child / "params.json").unlink()  # the bot writes its own params.json, never into the linked one
+    (child / "params.json").write_text(json.dumps(p))
+    return p
+
+
+def _production_rows(work: Path) -> int:
+    return sum(1 for ln in (work / "wyniki" / "rmsd.csv").read_text().splitlines()[1:] if ln.startswith("md,"))
+
+
+@pytest.mark.slow
+def test_gromacs_extend_1l2y(tmp_path):
+    pytest.importorskip("gemmi")
+    env = _recipe_env()
+    if not shutil.which("gmx", path=env["PATH"]):
+        pytest.skip("gmx not on PATH")
+    cmd = [sys.executable, "-m", "compute_bot.recipes.md"]
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    p = RECIPES["md"].validate({"pdb": "1L2Y", "nvt_ps": "2", "npt_ps": "2", "ns": "0.004", "seed": "5"})
+    (parent / "params.json").write_text(json.dumps(p))
+    t0 = time.time()
+    base = subprocess.run(cmd, cwd=parent, env=env, capture_output=True, text=True, timeout=1800)
+    t_base = time.time() - t0
+    assert base.returncode == 0, base.stderr[-3000:]
+    rows_before = _production_rows(parent)
+    before = _hashes(parent)
+
+    child = tmp_path / "child"
+    _child_job(parent, child, extend_ns=0.004)
+    t1 = time.time()
+    ext = subprocess.run(cmd, cwd=child, env=env, capture_output=True, text=True, timeout=1800)
+    t_ext = time.time() - t1
+    assert ext.returncode == 0, ext.stdout[-3000:] + ext.stderr[-3000:]
+    assert _hashes(parent) == before, "the parent job's files changed"
+    gdir = child / "gromacs"
+    assert (gdir / "md_ext1.done.json").exists() and list(gdir.glob("md_ext1.part*.xtc"))
+    assert _production_rows(child) >= 2 * rows_before - 2
+    summary = (child / "summary.txt").read_text()
+    assert "Przedłużenie" in summary and "0.008 ns" in summary
+    again = subprocess.run(cmd, cwd=child, env=env, capture_output=True, text=True, timeout=600)
+    assert again.returncode == 0 and "md_ext1 już policzony" in again.stdout
+    assert _hashes(parent) == before
+    print(f"\ntiming: base job {t_base:.0f} s, extension + analysis {t_ext:.0f} s")
+
+
+@pytest.mark.slow
+def test_openmm_end_to_end_1l2y_kill_resume_extend(tmp_path):
+    pytest.importorskip("openmm")
+    pytest.importorskip("pdbfixer")
+    pytest.importorskip("MDAnalysis")
+    env = dict(_recipe_env(), MD_CHECKPOINT_S="2")
+    cmd = [sys.executable, "-m", "compute_bot.recipes.md"]
+    work = tmp_path / "work"
+    work.mkdir()
+    p = RECIPES["md"].validate({"pdb": "1L2Y", "engine": "openmm", "nvt_ps": "2", "npt_ps": "2", "ns": "0.01",
+                                "seed": "3"})
+    (work / "params.json").write_text(json.dumps(p))
+    odir = work / "openmm"
+
+    # run 1: killed hard (like a power cut) once production has a checkpoint
+    t0 = time.time()
+    proc = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            start_new_session=True)
+    seen = []
+    for line in proc.stdout:
+        seen.append(line)
+        if line.startswith("PROGRESS:") and "produkcja" in line and "krok" in line and (odir / "md.chk.xml").exists():
+            break
+    else:
+        proc.wait()
+        pytest.fail("production never checkpointed:\n" + "".join(seen[-40:]))
+    os.killpg(proc.pid, signal.SIGKILL)
+    proc.wait(timeout=60)
+    t_first = time.time() - t0
+    assert not (odir / "md.done.json").exists()
+
+    # run 2: resumes from the checkpoint, analyses
+    t1 = time.time()
+    run2 = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1800)
+    t_second = time.time() - t1
+    assert run2.returncode == 0, run2.stdout[-3000:] + run2.stderr[-3000:]
+    assert "wznawiam md z checkpointu" in run2.stdout
+    assert "em już policzony" in run2.stdout and "npt już policzony" in run2.stdout
+    parts = json.loads((odir / "md.parts.json").read_text())
+    assert len(parts) == 2 and parts[1]["start"] > 0
+    summary = (work / "summary.txt").read_text()
+    for word in ("1L2Y", "OpenMM", "amber99sb-ildn", "Minimalizacja", "RMSD", "ns/dzień", "Na", "Cl", "wód"):
+        assert word in summary, word
+    highlights = [ln for ln in (work / "highlights.txt").read_text().splitlines() if ln]
+    assert 1 <= len(highlights) <= 4 and all((work / h).stat().st_size > 5000 for h in highlights)
+    results = work / "wyniki"
+    for name in ("energia_nvt.csv", "energia_npt.csv", "energia_md.csv", "rmsd.csv", "rmsf.csv", "rg.csv",
+                 "wiazania_h.csv", "dssp.csv", "uklad.csv", "struktura.txt", "bialko.xtc", "bialko_klatki.pdb"):
+        assert (results / name).exists(), name
+    md_rows = _production_rows(work)
+    assert md_rows == M.nsteps(10) // M.nice_interval(M.nsteps(10), 1000)  # no duplicated or lost frames
+    system = json.loads((odir / "system.json").read_text())
+    assert system["charge_total"] == pytest.approx(0.0, abs=1e-3) and system["na"] > 0
+
+    # run 3: nothing left to do
+    run3 = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=600)
+    assert run3.returncode == 0, run3.stderr[-3000:]
+    for stage in ("em", "nvt", "npt", "md"):
+        assert f"{stage} już policzony" in run3.stdout
+
+    # extension in a hard-linked child job
+    before = _hashes(work)
+    child = tmp_path / "child"
+    _child_job(work, child, extend_ns=0.004)
+    t2 = time.time()
+    ext = subprocess.run(cmd, cwd=child, env=env, capture_output=True, text=True, timeout=1800)
+    t_ext = time.time() - t2
+    assert ext.returncode == 0, ext.stdout[-3000:] + ext.stderr[-3000:]
+    assert _hashes(work) == before, "the parent job's files changed"
+    assert (child / "openmm" / "md_ext1.done.json").exists()
+    assert _production_rows(child) > md_rows
+    assert "Przedłużenie" in (child / "summary.txt").read_text()
+    print(f"\ntiming: killed run {t_first:.0f} s, resumed run + analysis {t_second:.0f} s, "
+          f"extension + analysis {t_ext:.0f} s")

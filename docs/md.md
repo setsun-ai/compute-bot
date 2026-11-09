@@ -1,4 +1,4 @@
-# Przepis `md` – dynamika molekularna białka (GROMACS)
+# Przepis `md` – dynamika molekularna białka (GROMACS albo OpenMM)
 
 Małe białko w wodzie od pliku PDB do wykresów: kontrola struktury → topologia → pudełko z wodą i jonami →
 minimalizacja → NVT → NPT → produkcja → analiza. Liczy się na laptopie (CPU), więc każdy krok przetrwa restart:
@@ -26,6 +26,10 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
 | `model` | 1 | który model z pliku NMR |
 | `chains` | wszystkie | łańcuchy do zostawienia, np. `A,B` |
 | `seed` | -1 | ziarno prędkości początkowych i genion (-1 = losowe) |
+| `ensemble` | npt | produkcja w NPT (C-rescale / barostat MC) albo NVT |
+| `engine` | gromacs | `gromacs` albo `openmm` (ten sam protokół i te same wyniki) |
+| `mdp` | – | tylko GROMACS: zmiany w mdp produkcji, `klucz=wartość;klucz=wartość` |
+| `extend_ns` | 0 | dolicz tyle ns do skończonej produkcji (komenda /dolicz) |
 
 ## Co się dzieje
 
@@ -48,6 +52,39 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
    zbieżność minimalizacji, T / Epot / ciśnienie / gęstość, `trjconv -pbc mol -center`, RMSD szkieletu względem
    struktury po minimalizacji, RMSF Cα, Rg, mostki H białko–białko, `gmx dssp` (GROMACS ≥ 2023), wydajność ns/dzień.
 
+## engine=openmm
+
+Ten sam protokół w OpenMM (CPU, `COMPUTE_THREADS` wątków), pliki w `openmm/`:
+
+- Struktura jak wyżej, potem pdbfixer (brakujące atomy, w tym końcowy OXT), `Modeller.addHydrogens` przy pH 7,
+  pudełko o tym samym rozmiarze co w GROMACS (średnica białka + 2·d, ten sam kształt), woda, NaCl `salt` +
+  zobojętnienie.
+- Pola: amber99sb-ildn → `amber99sbildn.xml`, amber99sb, amber03, charmm27 → **CHARMM36** (`charmm36.xml` +
+  jego TIP3P; CHARMM27 w OpenMM nie ma). Woda: tip3p, tip4p (→ TIP4P-Ew), spce. GROMOS i OPLS-AA tylko w GROMACS.
+- Minimalizacja L-BFGS, potem NVT i NPT z więzami położeń atomów ciężkich (1000 kJ/mol/nm², jak `posre.itp`),
+  barostat Monte Carlo (1 bar), produkcja; LangevinMiddle 2 fs (tarcie 1/ps), więzy HBonds, PME.
+- Wznawianie: stan zapisywany co ~5 min (`MD_CHECKPOINT_S`) i przy SIGTERM; po restarcie nowa część trajektorii
+  (`md.part2.dcd` …) od ostatniego stanu, klatki policzone po tym stanie są odrzucane. Gotowy etap ma `*.done.json`.
+- Wyniki: DCD + CSV ze StateDataReporter, analiza MDAnalysis (RMSD, RMSF, Rg, mostki H, DSSP – 3 stany H/E/pętla).
+  OpenMM nie zapisuje ciśnienia, więc tego panelu brak.
+
+## mdp=… (tylko GROMACS)
+
+Zmienia lub dopisuje opcje w `md.mdp` produkcji, np. `md pdb=1L2Y mdp=nstxout-compressed=100;tcoupl=nose-hoover;tau_t=1.0 1.0`.
+Sprawdzana jest tylko składnia (`klucz=wartość`, `-` i `_` w kluczu znaczą to samo); resztę ocenia grompp – jego
+ostrzeżenie trafia do komunikatu błędu. Zmiany są wypisane w podsumowaniu. Z `engine=openmm` – błąd.
+
+## extend_ns – doliczanie
+
+`/dolicz` tworzy nowe zadanie z całym katalogiem poprzedniego (pliki dowiązane twardo) i `extend_ns=X`:
+
+- GROMACS: `gmx convert-tpr -extend` → `md_ext1.tpr`, potem `mdrun -cpi md.cpt -noappend` do nowych plików
+  `md_ext1.part0002.*` (kolejne doliczenie: `md_ext2` z `md_ext1.cpt`). OpenMM: `md_ext1.part*.dcd` od stanu
+  końcowego produkcji.
+- Pliki poprzedniego zadania nigdy nie są zmieniane: wszystko, co trzeba zapisać, powstaje jako nowy plik.
+- Analiza obejmuje całą produkcję (GROMACS: `md_full.xtc`/`md_full.edr` z `trjcat`/`eneconv`), podsumowanie
+  podaje łączną długość. Przerwane doliczanie wznawia się z `md_ext1.cpt`; gotowe jest pomijane.
+
 ## Co wraca
 
 - `summary.txt` – najważniejsze liczby (po polsku), 4 wykresy jako zdjęcia: `rownowagowanie.png`, `rmsd_rg.png`,
@@ -56,12 +93,13 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
   `rg.csv`, `wiazania_h.csv`, `dssp.csv`, `em_energia.csv`), `uklad.csv`, `wydajnosc.csv`, `struktura.txt`,
   do obejrzenia: `bialko_em.pdb` + `bialko.xtc` (samo białko, dopasowane) i `bialko_klatki.pdb` (wielomodelowy,
   ≤ ~20 MB, np. do PyMOL).
-- `gromacs/` – wszystkie pliki GROMACS (`topol.top`, `*.mdp`, `*.tpr`, `*.log`, `*.edr`, `*.xtc`, `*_noPBC.xtc`).
+- `gromacs/` – wszystkie pliki GROMACS (`topol.top`, `*.mdp`, `*.tpr`, `*.log`, `*.edr`, `*.xtc`, `*_noPBC.xtc`);
+  przy `engine=openmm` – `openmm/` (`system.xml`, `system.pdb`, `*.state.xml`, `*.part*.dcd`, `*.part*.csv`).
 
 ## Uwagi
 
 - W 600 K i 1 bar (NPT) woda paruje i gęstość spada – podsumowanie to zaznacza. Do samego rozwijania białka
-  wygodniejsza jest produkcja w NVT.
+  wygodniejsza jest produkcja w NVT (`ensemble=nvt`).
 - Białka wielołańcuchowe: `-pbc mol` składa każdy łańcuch osobno, kompleks może wyglądać na rozerwany przez
   granicę pudełka (RMSD i tak jest liczone po dopasowaniu).
 - Ligandy, jony z kryształu i kwasy nukleinowe nie są parametryzowane – są usuwane.

@@ -27,20 +27,74 @@ def gmx_env(threads: int) -> dict:
 
 
 def fatal_error(text: str) -> str:
-    """The 'Fatal error:' paragraph GROMACS prints, else the last non-empty lines."""
+    """The 'Fatal error:' paragraph GROMACS prints (with the grompp warnings that caused it), else the last lines."""
     m = re.search(r"(?:Fatal error|Error in user input):?\s*\n(.*?)(?:\n\s*\n|For more information)", text, re.S)
     if m:
-        return " ".join(m.group(1).split())[:600]
+        msg = " ".join(m.group(1).split())
+        warnings = re.findall(r"^WARNING \d+ \[.*?\]:[ \t]*\n((?:[ \t]+\S.*(?:\n|$))+)", text, re.M)
+        if warnings and "warning" in msg.lower():
+            msg = " ".join(" ".join(w.split()) for w in warnings[:2]) + " – " + msg
+        return msg[:700]
     lines = [ln.strip() for ln in text.splitlines() if ln.strip() and "GROMACS reminds you" not in ln]
     return " | ".join(lines[-4:])[:600]
 
 
+# --- files that may be hard links into another job's tree (an extension job) ----------------------------------------
+
+def fresh_output(path) -> Path:
+    """Remove `path` before something writes it, so a hard-linked file of the parent job is never overwritten."""
+    path = Path(path)
+    if path.exists() or path.is_symlink():
+        path.unlink()
+    return path
+
+
+def write_text(path, text: str) -> Path:
+    """Write via a temporary file and rename: never in place, never half-written."""
+    path = Path(path)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, path)
+    return path
+
+
+def own(path) -> Path:
+    """Before appending to a file: if it is shared with another job (hard link), make a private copy first."""
+    path = Path(path)
+    if path.exists() and path.stat().st_nlink > 1:
+        tmp = path.with_name(f".{path.name}.own")
+        shutil.copy2(path, tmp)
+        os.replace(tmp, path)
+    return path
+
+
+def copy_file(src, dst) -> Path:
+    shutil.copyfile(src, fresh_output(dst))
+    return Path(dst)
+
+
+OUTPUT_FLAGS = {"-o", "-num", "-od", "-oc", "-po"}
+EXTRA_OUTPUTS = {"pdb2gmx": {"-p", "-i"}}
+IMPLICIT_OUTPUTS = {"hbond": {"-o": "hbond.ndx"}, "grompp": {"-po": "mdout.mdp"}}  # written even when not asked
+EDITED_IN_PLACE = {"solvate": {"-p"}, "genion": {"-p"}}  # they rewrite the topology they are given
+
+
 def run_gmx(args: list[str], cwd: Path, env: dict, stdin: str = "", log: Path | None = None,
             check: bool = True) -> subprocess.CompletedProcess:
-    """gmx <args> with `stdin` piped in (group choices), output appended to `log`."""
+    """gmx <args> with `stdin` piped in (group choices), output appended to `log`. Outputs are unlinked first and
+    edited inputs made private, so files hard-linked from a parent job are never changed."""
+    tool = args[0]
+    for flag, value in zip(args, args[1:], strict=False):
+        if flag in OUTPUT_FLAGS or flag in EXTRA_OUTPUTS.get(tool, ()):
+            fresh_output(Path(cwd) / value)
+        elif flag in EDITED_IN_PLACE.get(tool, ()):
+            own(Path(cwd) / value)
+    for flag, default in IMPLICIT_OUTPUTS.get(tool, {}).items():
+        if flag not in args:
+            fresh_output(Path(cwd) / default)
     proc = subprocess.run(["gmx", *args], cwd=cwd, input=stdin, text=True, capture_output=True, env=env)
     if log is not None:
-        with open(log, "a") as fh:
+        with open(own(log), "a") as fh:
             fh.write(f"$ gmx {' '.join(args)}" + (f"   <<< {stdin!r}" if stdin else "") + "\n")
             fh.write(proc.stdout + proc.stderr + "\n")
     if check and proc.returncode != 0:
@@ -234,12 +288,13 @@ class Progress:
         self.first = None
         self.last_emit = -1e18
 
-    def set_rate_from_nsday(self, nsday: float | None):
-        if nsday and self.rate is None:
+    def set_rate_from_nsday(self, nsday: float | None, force: bool = False):
+        if nsday and (self.rate is None or force):
             self.rate = nsday / (0.002e-3 * 86400)  # 2 fs steps
 
     def start(self, stage) -> str:
         self._reset(stage)
+        self.started = None
         i = self.plan.index(stage) + 1
         what = f"{stage.title} ({stage.ps:g} ps, {stage.temp:g} K)" if stage.dynamic else stage.title
         return f"PROGRESS: etap {i}/{len(self.plan)}: {what} – start" + self._total_eta(0)
@@ -251,7 +306,8 @@ class Progress:
     def _total_eta(self, step: int) -> str:
         if not self.rate or not self.stage.dynamic:
             return ""
-        left = (self.stage.nsteps - step + self._later_steps()) / self.rate
+        left = (self.stage.first_step + self.stage.nsteps - max(step, self.stage.first_step)
+                + self._later_steps()) / self.rate
         end = datetime.now() + timedelta(seconds=left)
         return f"; do końca całości ~{fmt_duration(left)} (ok. {end:%d.%m %H:%M})"
 
@@ -259,9 +315,15 @@ class Progress:
         info = parse_progress(text)
         if info is None or self.stage is None:
             return None
+        return self.update(info)
+
+    def update(self, info: dict) -> str | None:
+        """`info`: {"step": n} plus optional finish / remaining / epot+fmax; returns a PROGRESS line when due."""
         t = self.now()
         step = info["step"]
-        if self.first is None:
+        if not self.stage.dynamic:
+            pass  # minimisation steps say nothing about MD speed
+        elif self.first is None:
             self.first = (t, step)
         elif t - self.first[0] >= 5 and step > self.first[1]:
             self.rate = (step - self.first[1]) / (t - self.first[0])
@@ -272,8 +334,9 @@ class Progress:
         head = f"PROGRESS: etap {i}/{len(self.plan)}: {self.stage.title}"
         if "fmax" in info:
             return f"{head}, krok {step}, Fmax {info['fmax']:.3g}, Epot {info['epot']:.4g} kJ/mol"
-        pct = 100.0 * step / max(self.stage.nsteps, 1)
-        msg = f"{head} {math.floor(pct)}% (krok {step}/{self.stage.nsteps})"
+        done = step - self.stage.first_step
+        pct = 100.0 * done / max(self.stage.nsteps, 1)
+        msg = f"{head} {math.floor(pct)}% (krok {done}/{self.stage.nsteps})"
         if "finish" in info:
             try:
                 msg += f", koniec etapu ok. {datetime.strptime(info['finish'], '%a %b %d %H:%M:%S %Y'):%d.%m %H:%M}"
@@ -286,9 +349,14 @@ class Progress:
 
 def run_md_step(stage, gdir: Path, env: dict, progress: Progress) -> str:
     """`md_step NAME grompp-args` with live progress; returns its (non-chatter) output. Raises RecipeError."""
+    return run_streaming([md_step_path(), stage.name, *stage.grompp], stage, gdir, env, progress)
+
+
+def run_streaming(cmd: list[str], stage, gdir: Path, env: dict, progress: Progress) -> str:
+    """Run an mdrun-like command, turning its -v chatter into PROGRESS lines; output kept in gdir/NAME.out."""
     print(progress.start(stage), flush=True)
-    out_path = gdir / f"{stage.name}.out"
-    proc = subprocess.Popen([md_step_path(), stage.name, *stage.grompp], cwd=gdir, env=env, stdin=subprocess.DEVNULL,
+    out_path = own(gdir / f"{stage.name}.out")
+    proc = subprocess.Popen(cmd, cwd=gdir, env=env, stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     kept, buf = [], b""
     with open(out_path, "ab") as log:
@@ -308,7 +376,7 @@ def run_md_step(stage, gdir: Path, env: dict, progress: Progress) -> str:
                 if parse_progress(text) is None:
                     log.write(raw + b"\n")
                     kept.append(text)
-                    if text.startswith("md_step:"):
+                    if text.startswith(("md_step:", "Reading checkpoint", "Restarting from checkpoint")):
                         print(text, flush=True)
     rc = proc.wait()
     text = "\n".join(kept)

@@ -9,7 +9,18 @@ from pathlib import Path
 
 import numpy as np
 
-from .gmxtools import RecipeError, fresh, gro_residues, parse_em_log, parse_performance, read_xvg, run_gmx
+from .extend import production_segments, segment_files
+from .gmxtools import (
+    RecipeError,
+    fresh,
+    fresh_output,
+    gro_residues,
+    parse_em_log,
+    parse_performance,
+    read_xvg,
+    run_gmx,
+    write_text,
+)
 
 ENERGY_TERMS = ["Temperature", "Pressure", "Density", "Volume", "Potential"]
 STAGE_COLORS = {"nvt": "#4C72B0", "npt": "#55A868", "md": "#C44E52"}
@@ -25,7 +36,7 @@ def finished(gdir: Path, name: str) -> bool:
 
 
 def write_csv(path: Path, header: list, rows):
-    with open(path, "w", newline="") as fh:
+    with open(fresh_output(path), "w", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(header)
         w.writerows(rows)
@@ -64,40 +75,77 @@ class Gmx:
         return run_gmx(args, self.gdir, self.env, stdin=stdin, log=self.log, check=check)
 
 
-def run(work: Path, gdir: Path, out: Path, plan, p: dict, struct: dict, system: dict, env: dict):
-    import matplotlib
-
-    matplotlib.use("Agg")
-    gmx = Gmx(gdir, env)
-    res = {"warnings": []}
-    em = analyse_em(gdir, out, gmx, res)
-    stages = [s for s in plan if s.dynamic and finished(gdir, s.name)]
+def stage_offsets(plan) -> dict:
     offsets, t = {}, 0.0
     for s in plan:
         if s.dynamic:
             offsets[s.name] = t
             t += s.ps
-    energies, rmsd = {}, {}
+    return offsets
+
+
+def collect_gromacs(gdir: Path, out: Path, plan, system: dict, env: dict) -> dict:
+    """Run the GROMACS analysis tools on every finished stage; production = md + finished extensions."""
+    gmx = Gmx(gdir, env)
+    res = {"warnings": []}
+    em = analyse_em(gdir, out, gmx, res)
+    stages = [s for s in plan if s.dynamic and finished(gdir, s.name)]
+    energies, rmsd, perf = {}, {}, {}
     for s in stages:
-        energies[s.name] = stage_energy(gdir, out, gmx, s.name)
-        rmsd[s.name] = stage_rmsd(gdir, gmx, s.name)
-    prod = next((s for s in stages if s.name == "md"), None)
-    if prod is not None:
-        production_analysis(gdir, out, gmx, res, system)
+        base, last_log = s.name, gdir / f"{s.name}.log"
+        if s.name == "md":
+            base, last_log = production_files(gdir, gmx)
+        energies[s.name] = stage_energy(gdir, out, gmx, s.name, base)
+        rmsd[s.name] = stage_rmsd(gdir, gmx, base, tpr=f"{s.name}.tpr")
+        perf[s.name] = parse_performance(last_log.read_text(errors="replace"))
+        if s.name == "md":
+            production_analysis(gdir, out, gmx, res, system, base)
+    return {"em": em, "stages": stages, "energies": energies, "rmsd": rmsd, "res": res, "perf": perf}
+
+
+def production_files(gdir: Path, gmx) -> tuple[str, Path]:
+    """Base name of the production trajectory/energy files (md, or md_full joined from md + extension parts) and
+    the log with the latest performance."""
+    segs = production_segments(gdir)
+    if len(segs) == 1:
+        return "md", gdir / "md.log"
+    xtcs = [f for seg in segs for f in segment_files(gdir, seg, "xtc")]
+    edrs = [f for seg in segs for f in segment_files(gdir, seg, "edr")]
+    if not fresh(gdir / "md_full.xtc", *xtcs):
+        gmx(["trjcat", "-f", *[f.name for f in xtcs], "-o", "md_full.xtc"])
+    if not fresh(gdir / "md_full.edr", *edrs):
+        gmx(["eneconv", "-f", *[f.name for f in edrs], "-o", "md_full.edr"])
+    return "md_full", segment_files(gdir, segs[-1], "log")[-1]
+
+
+def report(work: Path, out: Path, data: dict, p: dict, plan, struct: dict, system: dict, info: dict):
+    """CSVs, plots, summary.txt and highlights.txt from the collected data (the same for both engines).
+    `info`: engine notes, mdp overrides, production segments."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    offsets = stage_offsets(plan)
+    stages, energies, rmsd, res, perf, em = (data[k] for k in ("stages", "energies", "rmsd", "res", "perf", "em"))
     plots = make_plots(out, plan, stages, offsets, energies, rmsd, res, em)
-    perf = {s.name: parse_performance((gdir / f"{s.name}.log").read_text(errors="replace")) for s in stages}
-    write_csv(out / "wydajnosc.csv", ["etap", "ps", "ns_na_dobe"], [[s.name, s.ps, perf[s.name]] for s in stages])
+    for s in stages:
+        e = energies[s.name]
+        if e:
+            terms = [k for k in ENERGY_TERMS if k in e]
+            write_csv(out / f"energia_{s.name}.csv", ["czas_ps"] + terms,
+                      [[f"{row[0]:.3f}"] + [f"{v:.4f}" for v in row[1:]]
+                       for row in zip(e["time"], *[e[k] for k in terms], strict=True)])
+    write_csv(out / "wydajnosc.csv", ["etap", "ps", "ns_na_dobe"], [[s.name, s.ps, perf.get(s.name)] for s in stages])
     write_csv(out / "uklad.csv", ["wielkosc", "wartosc"], system_rows(system))
     write_csv(out / "rmsd.csv", ["etap", "czas_ps", "rmsd_nm"],
               [[n, f"{x + offsets[n]:.3f}", f"{y:.4f}"]
                for n, (xs, ys) in rmsd.items() for x, y in zip(xs, ys, strict=False)])
-    (out / "struktura.txt").write_text(struct["report"] + "\n\n" + "\n".join(struct.get("notes", [])) + "\n")
-    summary = make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf)
-    (work / "summary.txt").write_text(summary)
-    (work / "highlights.txt").write_text("".join(f"{OUT_REL}/{name}\n" for name in plots[:4]))
-    (out / "analiza.json").write_text(json.dumps({"warnings": res["warnings"], "performance_ns_day": perf,
-                                                  "em": {k: v for k, v in em.items() if k != "series"}},
-                                                 ensure_ascii=False, indent=1))
+    write_text(out / "struktura.txt", struct["report"] + "\n\n" + "\n".join(struct.get("notes", [])) + "\n")
+    write_text(work / "summary.txt", make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf, info))
+    write_text(work / "highlights.txt", "".join(f"{OUT_REL}/{name}\n" for name in plots[:4]))
+    write_text(out / "analiza.json", json.dumps({"warnings": res["warnings"], "performance_ns_day": perf,
+                                                 "em": {k: v for k, v in em.items() if k != "series"},
+                                                 "segments": info.get("segments", ["md"])},
+                                                ensure_ascii=False, indent=1))
 
 
 OUT_REL = "wyniki"
@@ -123,22 +171,22 @@ def analyse_em(gdir, out, gmx, res) -> dict:
     return em
 
 
-def stage_energy(gdir, out, gmx, name) -> dict:
-    xvg_path = gdir / f"{name}_energy.xvg"
-    if not fresh(xvg_path, gdir / f"{name}.edr"):
-        gmx(["energy", "-f", f"{name}.edr", "-o", xvg_path.name], stdin="\n".join(ENERGY_TERMS) + "\n\n")
+def stage_energy(gdir, out, gmx, name, base=None) -> dict:
+    base = base or name
+    xvg_path = gdir / f"{base}_energy.xvg"
+    if not fresh(xvg_path, gdir / f"{base}.edr"):
+        gmx(["energy", "-f", f"{base}.edr", "-o", xvg_path.name], stdin="\n".join(ENERGY_TERMS) + "\n\n")
     xvg = read_xvg(xvg_path)
     series = {leg: xvg.column(leg) for leg in xvg.legends}
     series["time"] = xvg.x
-    write_csv(out / f"energia_{name}.csv", ["czas_ps"] + xvg.legends,
-              [[f"{row[0]:.3f}"] + [f"{v:.4f}" for v in row[1:]] for row in xvg.data])
     return series
 
 
-def stage_rmsd(gdir, gmx, name):
+def stage_rmsd(gdir, gmx, name, tpr=None):
+    tpr = tpr or f"{name}.tpr"
     nopbc = gdir / f"{name}_noPBC.xtc"
     if not fresh(nopbc, gdir / f"{name}.xtc"):
-        gmx(["trjconv", "-s", f"{name}.tpr", "-f", f"{name}.xtc", "-o", nopbc.name, "-pbc", "mol", "-center"],
+        gmx(["trjconv", "-s", tpr, "-f", f"{name}.xtc", "-o", nopbc.name, "-pbc", "mol", "-center"],
             stdin="Protein\nSystem\n")
     xvg_path = gdir / f"{name}_rmsd.xvg"
     if not fresh(xvg_path, nopbc):
@@ -155,8 +203,8 @@ def _gmx_selection_tool(gmx, new_args, old_args, stdin_old):
         return gmx(old_args, stdin=stdin_old)
 
 
-def production_analysis(gdir, out, gmx, res, system):
-    nopbc = gdir / "md_noPBC.xtc"
+def production_analysis(gdir, out, gmx, res, system, base="md"):
+    nopbc = gdir / f"{base}_noPBC.xtc"
     names = gro_residues((gdir / "processed.gro").read_text())
     # RMSF per residue (C-alpha, fitted)
     if not fresh(gdir / "rmsf.xvg", nopbc):
@@ -250,7 +298,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
         for ax, (term, label) in zip(axes.flat, panels, strict=False):
             for s in stages:
                 e = energies[s.name]
-                if term not in e:
+                if term not in e or (term == "Density" and not s.pcoupl):
                     continue
                 x = e["time"] + offsets[s.name]
                 ax.plot(x, e[term], color=STAGE_COLORS[s.name], lw=0.8, alpha=0.6, label=titles[s.name])
@@ -258,6 +306,9 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
                 smooth = _running(e[term], n)
                 if smooth is not None:
                     ax.plot(x[n - 1:], smooth, color=STAGE_COLORS[s.name], lw=1.8)
+            if not any(term in energies[s.name] for s in stages):
+                text = "brak danych (OpenMM nie zapisuje ciśnienia)" if term == "Pressure" else "brak danych"
+                ax.text(0.5, 0.5, text, transform=ax.transAxes, ha="center", va="center", color="0.4")
             ax.set_ylabel(label)
             ax.grid(alpha=0.3)
         axes[0, 0].legend(fontsize=8)
@@ -265,7 +316,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
             ax.set_xlabel("czas [ps]")
         fig.suptitle("Równowagowanie i produkcja: temperatura, energia potencjalna, ciśnienie, gęstość")
         fig.tight_layout()
-        fig.savefig(out / "rownowagowanie.png", dpi=150)
+        fig.savefig(fresh_output(out / "rownowagowanie.png"), dpi=150)
         plt.close(fig)
         made.append("rownowagowanie.png")
     if rmsd:
@@ -288,7 +339,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
             ax.set_title("Promień bezwładności białka (produkcja)")
             ax.grid(alpha=0.3)
         fig.tight_layout()
-        fig.savefig(out / "rmsd_rg.png", dpi=150)
+        fig.savefig(fresh_output(out / "rmsd_rg.png"), dpi=150)
         plt.close(fig)
         made.append("rmsd_rg.png")
     if "rmsf" in res:
@@ -302,7 +353,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
         ax.set_title("RMSF reszt w produkcji")
         ax.grid(axis="y", alpha=0.3)
         fig.tight_layout()
-        fig.savefig(out / "rmsf.png", dpi=150)
+        fig.savefig(fresh_output(out / "rmsf.png"), dpi=150)
         plt.close(fig)
         made.append("rmsf.png")
     if "dssp" in res:
@@ -316,7 +367,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
         ax.set_title("Wiązania wodorowe białko–białko (produkcja)")
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        fig.savefig(out / "wiazania_h.png", dpi=150)
+        fig.savefig(fresh_output(out / "wiazania_h.png"), dpi=150)
         plt.close(fig)
         made.append("wiazania_h.png")
     if em.get("series") is not None:
@@ -328,7 +379,7 @@ def make_plots(out, plan, stages, offsets, energies, rmsd, res, em) -> list[str]
         ax.set_title("Minimalizacja energii")
         ax.grid(alpha=0.3)
         fig.tight_layout()
-        fig.savefig(out / "minimalizacja.png", dpi=150)
+        fig.savefig(fresh_output(out / "minimalizacja.png"), dpi=150)
         plt.close(fig)
     return made
 
@@ -359,19 +410,28 @@ def plot_dssp(out, dssp, offset) -> str:
     ax2.legend(fontsize=7)
     ax2.grid(alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out / "dssp.png", dpi=150)
+    fig.savefig(fresh_output(out / "dssp.png"), dpi=150)
     plt.close(fig)
     return "dssp.png"
 
 
 # --- summary --------------------------------------------------------------------------------------------------------
 
-def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf) -> str:
+def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf, info=None) -> str:
+    info = info or {}
     done = {s.name for s in stages}
     prod = next(s for s in plan if s.name == "md")
     ens = "NPT" if prod.pcoupl else "NVT"
-    lines = [f"MD {struct.get('code', '')}: {system['ff']} + {system['water']}, produkcja {p['ns']:g} ns "
-             f"w {p['T']:g} K ({ens})"]
+    engine = "OpenMM" if system.get("engine") == "openmm" else "GROMACS"
+    lines = [f"MD {struct.get('code', '')} ({engine}): {system['ff']} + {system['water']}, produkcja "
+             f"{prod.ps / 1000:g} ns w {prod.temp:g} K ({ens})"]
+    segs = info.get("segments", ["md"])
+    if len(segs) > 1:
+        lines.append(f"Przedłużenie: produkcja doliczana {len(segs) - 1}× (segmenty {', '.join(segs)}), razem "
+                     f"{prod.ps / 1000:g} ns; analiza obejmuje całą produkcję.")
+    if info.get("overrides"):
+        lines.append("Zmienione opcje produkcji (mdp): " + "; ".join(f"{k}={v}" for k, v in info["overrides"]) + ".")
+    lines += [f"- {n}" for n in info.get("notes", [])]
     chains = ", ".join(f"{c['name']} ({c['residues']} reszt)" for c in struct["chains"])
     model = f"model {p['model']} z {struct['models']}" if struct["models"] > 1 else "1 model"
     lines.append(f"Struktura: {struct['file']}, {model}; łańcuchy: {chains}.")
@@ -381,10 +441,15 @@ def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf)
                  f"V = {system['volume']:.1f} nm³; {system['atoms']} atomów, {system['waters']} wód, "
                  f"{system['na']} Na⁺, {system['cl']} Cl⁻ ({system['salt']:g} M); ładunek białka "
                  f"{_charge(system['charge_protein'])} e, układu {_charge(system['charge_total'])} e.")
-    lines.append("Protonacja i końce: pdb2gmx (Lys/Arg +, Asp/Glu −, His wg sieci wiązań H), końce NH₃⁺/COO⁻.")
+    if engine == "OpenMM":
+        lines.append("Protonacja: Modeller.addHydrogens pH 7; końce naładowane; pola: "
+                     + " + ".join(system["xml"]) + ".")
+    else:
+        lines.append("Protonacja i końce: pdb2gmx (Lys/Arg +, Asp/Glu −, His wg sieci wiązań H), końce NH₃⁺/COO⁻.")
     if em:
         state = "zbieżna" if em["converged"] else "NIEZBIEŻNA"
-        lines.append(f"Minimalizacja: {state}, {em['steps']} kroków, Fmax {em['fmax']:.0f} kJ/mol/nm "
+        what = "iteracji L-BFGS" if engine == "OpenMM" else "kroków"
+        lines.append(f"Minimalizacja: {state}, {em['steps']} {what}, Fmax {em['fmax']:.0f} kJ/mol/nm "
                      f"(próg {em['emtol'] or 1000:g}), Epot {em['epot']:.4g} kJ/mol.")
     for s in stages:
         e = energies[s.name]
@@ -416,7 +481,8 @@ def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf)
         if "dssp" in res:
             h, b = dssp_fractions(res["dssp"][1])
             extra.append(f"DSSP helisa {100 * head_mean(h):.0f}% → {100 * tail_mean(h):.0f}%, "
-                         f"β {100 * head_mean(b):.0f}% → {100 * tail_mean(b):.0f}%")
+                         f"β {100 * head_mean(b):.0f}% → {100 * tail_mean(b):.0f}%"
+                         + (f" ({res['dssp_note']})" if res.get("dssp_note") else ""))
         if "rmsf" in res:
             labels, y = res["rmsf"]
             i = int(np.argmax(y))
@@ -431,7 +497,8 @@ def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf)
     if res["warnings"]:
         lines.append("Uwaga: " + "; ".join(res["warnings"]) + ".")
     lines.append("Pliki: wyniki/ (CSV, PNG, struktura.txt, uklad.csv, bialko.xtc + bialko_em.pdb, "
-                 f"bialko_klatki.pdb co {res.get('viewer_skip', 1)}. klatkę), pełne pliki GROMACS w gromacs/.")
+                 f"bialko_klatki.pdb co {res.get('viewer_skip', 1)}. klatkę), pełne pliki {engine} w "
+                 f"{'openmm' if engine == 'OpenMM' else 'gromacs'}/.")
     text = "\n".join(lines) + "\n"
     if len(text) > 2500:  # keep the message short: drop structure notes first, then cut
         keep = [ln for ln in lines if not ln.startswith("- ")]

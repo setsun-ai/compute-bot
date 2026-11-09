@@ -1,7 +1,10 @@
 """Stage plan and .mdp files generated from the recipe parameters (pure functions, no I/O)."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+from .gmxtools import RecipeError
 
 DT_PS = 0.002  # 2 fs, possible thanks to h-bond constraints
 EQUIL_T_MAX = 300.0  # equilibrate at room temperature, heat (if asked) only in production
@@ -61,6 +64,7 @@ class Stage:
     gen_vel: bool = False
     pcoupl: bool = False
     grompp: list = field(default_factory=list)
+    first_step: int = 0  # an extension continues the step count of the run it extends
 
     @property
     def ps(self) -> float:
@@ -102,14 +106,53 @@ def _fmt(x: float) -> str:
     return f"{x:g}"
 
 
-def make_mdp(stage: Stage, ff: str, seed: int) -> str:
+def output_intervals(stage: Stage) -> tuple[int, int]:
+    """(trajectory, energy) output intervals in steps: ~1000 production frames, ~100 per equilibration stage."""
+    return nice_interval(stage.nsteps, 1000 if stage.name == "md" else 100), nice_interval(stage.nsteps, 500)
+
+
+_KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+
+
+def parse_overrides(text: str) -> list[tuple[str, str]]:
+    """`key=value;key=value` from params.mdp; only the syntax is checked, grompp judges the content."""
+    out = []
+    for item in re.split(r"[;\n]", text or ""):
+        item = item.strip()
+        if not item:
+            continue
+        key, sep, value = (part.strip() for part in item.partition("="))
+        if not sep or not _KEY.fullmatch(key) or not value or "=" in value:
+            raise RecipeError(f"mdp: „{item}” – oczekuję klucz=wartość rozdzielone średnikami, "
+                              "np. mdp=nstxout-compressed=500;tcoupl=nose-hoover")
+        out.append((key, value))
+    return out
+
+
+def _norm(key: str) -> str:
+    return key.lower().replace("_", "-")
+
+
+def apply_overrides(rows: list[tuple[str, str]], overrides) -> list[tuple[str, str]]:
+    """Replace keys (GROMACS treats - and _ alike, any case) or append new ones."""
+    rows = list(rows)
+    for key, value in overrides or ():
+        hits = [i for i, (k, _) in enumerate(rows) if _norm(k) == _norm(key)]
+        if hits:
+            rows[hits[0]] = (rows[hits[0]][0], value)
+            rows = [r for i, r in enumerate(rows) if i not in hits[1:]]
+        else:
+            rows.append((key, value))
+    return rows
+
+
+def make_mdp(stage: Stage, ff: str, seed: int, overrides=None) -> str:
     """The .mdp text for one stage (as in a hand-made course run: 2 fs, h-bonds, PME, V-rescale, C-rescale)."""
     if stage.name == "em":
         rows = [("integrator", "steep"), ("emtol", "1000.0"), ("emstep", "0.01"), ("nsteps", str(stage.nsteps)),
                 ("nstenergy", "10"), ("nstlist", "10")] + nonbonded(ff) + [("pbc", "xyz")]
         return render(rows, "Energy minimisation (steepest descent)")
-    nstenergy = nice_interval(stage.nsteps, 500)
-    nstxout = nice_interval(stage.nsteps, 1000 if stage.name == "md" else 100)
+    nstxout, nstenergy = output_intervals(stage)
     nstlog = max(nice_interval(stage.nsteps, 100), nstenergy)
     rows = []
     if stage.posres:
@@ -137,6 +180,8 @@ def make_mdp(stage: Stage, ff: str, seed: int) -> str:
     else:
         rows.append(("gen_vel", "no"))
     rows.append(("pbc", "xyz"))
+    if overrides:
+        rows = apply_overrides(rows, overrides)
     what = {"nvt": "NVT with heavy-atom position restraints", "npt": "NPT with heavy-atom position restraints",
             "md": "production, no restraints"}[stage.name]
     return render(rows, f"{what}, {stage.ps:g} ps at {t} K")

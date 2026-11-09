@@ -99,7 +99,7 @@ class Recipe:
         return "\n".join(lines)
 
 
-FORCE_FIELDS = ("amber99sb-ildn", "amber03", "amber99sb", "charmm27", "oplsaa", "gromos54a7")
+FORCE_FIELDS = ("amber99sb-ildn", "amber14sb", "amber03", "amber99sb", "charmm27", "oplsaa", "gromos54a7")
 WATERS = ("auto", "tip3p", "tip4p", "spc", "spce")
 QSAR_MODELS = ("mlr", "pls", "ridge", "lasso", "enet", "knn", "dt", "rf", "svr", "xgb")
 

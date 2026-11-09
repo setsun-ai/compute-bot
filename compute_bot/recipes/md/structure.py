@@ -213,7 +213,7 @@ def prepare_structure(path: Path, out: Path, model: int, chains: str) -> list[st
     if scan["altloc_atoms"]:
         notes.append(f"Altloc: zostawiono pierwszy wariant ({scan['altloc_atoms']} atomów z altloc)")
     if scan["hydrogens"]:
-        notes.append("Wodory z pliku pominięte – pdb2gmx dodaje je od nowa (-ignh)")
+        notes.append("Wodory z pliku pominięte – dodawane od nowa (pdb2gmx -ignh / OpenMM addHydrogens)")
     st.remove_alternative_conformations()
     st.remove_hydrogens()
     st.remove_empty_chains()
