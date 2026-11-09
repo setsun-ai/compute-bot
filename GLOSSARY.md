@@ -17,3 +17,11 @@
 - **md_step** – pomocnik dla skryptów GROMACS: krok, który już się skończył, jest pomijany, przerwany wznawia się z
   `.cpt`.
 - **Zgłoszony stan (announced)** – ostatni stan, o którym bot napisał właścicielowi; należy do bota (`bot.json`).
+- **Pauza (hold)** – plik `hold` w `COMPUTE_HOME`, pisze go tylko bot (`/pauza`, `/wznow`). Runner zatrzymuje
+  bieżące zadanie (stan `paused`, `pause="hold"`) i nie startuje nowych. Pauza z gorąca to `pause="heat"`.
+- **Priorytet** – plik `jobs/NNNN/priority` (bot, `/top N`); runner bierze najpierw wyższy, przy równych starszy.
+- **Puls (heartbeat)** – `runner.json`, pisze tylko runner co 30 s: czas, bieżące zadanie, `blocked` (`hold`,
+  `disk` albo puste), wolne miejsce. Bot ostrzega raz, gdy puls jest starszy niż 3 minuty, a zadania czekają.
+- **Pobieranie (fetch)** – lista `{url, name}` w specu zadania z `/url`. Pierwszy krok samego zadania
+  (`compute_bot.fetch`): pobiera do `work/`, rozpakowuje zip, zostawia `.fetch_done`, potem uruchamia właściwą komendę.
+- **Cisza nocna** – godziny (domyślnie 23–7), w których bot wysyła wiadomości bez dźwięku; w `bot.json`.

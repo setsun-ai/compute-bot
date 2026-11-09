@@ -13,8 +13,12 @@ ostygnięcia. Po restarcie laptopa przerwane zadanie startuje znowu, a GROMACS w
 | zip receptor + ligandy + `dock` | AutoDock Vina, redocking kontrolny, ranking, kontakty | [docs/dock.md](docs/dock.md) |
 | zip z `run.sh`, `.tpr`, `.py`, `.ipynb` | dowolne obliczenie w środowisku conda | [docs/skrypty.md](docs/skrypty.md) |
 
-Komendy: `/jobs`, `/job N`, `/log N`, `/get N [plik]`, `/cancel N`, `/retry N`, `/co 3` (raport postępu co 3 h),
-`/system`, `/env`, `/update`, `/rollback`, `/help [przepis]`.
+Pliki większe niż 20 MB (limit Telegrama): `/url LINK omics …` – Google Drive, Dropbox albo zwykły link; plik
+pobiera się w samym zadaniu i wznawia po przerwie.
+
+Komendy: `/jobs`, `/job N`, `/log N`, `/get N [plik]`, `/cancel N`, `/retry N [klucz=wartość]`, `/top N`,
+`/usun N`, `/usun stare`, `/pauza`, `/wznow`, `/co 3` (raport postępu co 3 h), `/cisza 23-7`, `/system`, `/env`,
+`/update`, `/rollback`, `/help [przepis]`. Bot ostrzega, gdy runner przestaje odpowiadać albo kończy się dysk.
 
 ## Instalacja (Debian/Ubuntu, x86_64)
 
