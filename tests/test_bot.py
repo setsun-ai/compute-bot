@@ -459,3 +459,12 @@ def test_retry_of_a_terminal_job_without_kept_files_says_so(env):
     store.set_status(1, jobs.Status("failed", attempt=1))
     bot.handle_update(message("/retry 1"))
     assert len(store.specs()) == 1 and "terminal" in api.last_text()
+
+
+def test_a_card_started_from_the_panel_leaves_the_chat_too(env, tmp_path):
+    bot, api, store, _ = env
+    upload(bot, api, "1e0l.pdb", b"ATOM")
+    (token,) = bot.state["drafts"]
+    (tmp_path / "staging" / token / ".started").touch()
+    bot.tick()
+    assert bot.state["drafts"] == {} and not (tmp_path / "staging" / token).exists()

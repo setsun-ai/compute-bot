@@ -19,7 +19,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, drafts, jobs
+from . import VERSION, actions, drafts, jobs
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
 
@@ -408,14 +408,8 @@ class Bot:
         words = rest.replace(",", ".").split()
         if len(words) != 2 or not words[0].isdigit() or int(words[0]) not in self.store.ids():
             return self.say("Użycie: /dolicz N ILE_NS, np. /dolicz 4 5 – zadanie #4 o 5 ns dłużej.")
-        job = int(words[0])
-        spec, status = self.store.spec(job), self.store.status(job)
-        if spec.kind != "recipe" or spec.entry != "md" or status.state != "done":
-            return self.say(f"/dolicz działa dla skończonych zadań md; #{job} to {esc(spec.name)} ({status.state}).")
-        typed = {k: _text(v) for k, v in spec.params.items() if v not in (None, "", [])}
-        params = RECIPES["md"].validate({**typed, "extend_ns": words[1]})
-        child = self.store.create_from(job, params)
-        self.say(f"➕ <b>#{child.id}</b>: #{job} o {params['extend_ns']:g} ns dłużej, w kolejce.")
+        child = actions.extend(self.store, int(words[0]), words[1])
+        self.say(f"➕ <b>#{child.id}</b>: #{words[0]} o {child.params['extend_ns']:g} ns dłużej, w kolejce.")
 
     def log_command(self, job, _rest=""):
         self.say(f"📜 <b>#{job}</b>\n<pre>{esc(self.store.log_tail(job, 3500))}</pre>")
@@ -428,25 +422,12 @@ class Bot:
 
     def retry_command(self, job, rest=""):
         """The same files again; key=value after the number changes those parameters."""
-        spec = self.store.spec(job)
-        files = self.store.inputs(job)
-        if not files and not spec.fetch and spec.kind != "recipe":
-            return self.say(f"#{job} przyszło z terminala i jego pliki nie są trzymane drugi raz: "
-                            f"<code>compute submit …</code> jeszcze raz.")
         _, changes = jobs.parse_caption(rest)
-        params = dict(spec.params)
-        if changes:
-            if spec.kind != "recipe":
-                raise ParamError("Zmiana parametrów działa tylko dla przepisów.")
-            params = RECIPES[spec.entry].validate({**{k: _text(v) for k, v in spec.params.items()
-                                                      if v not in (None, "", [])}, **changes})
-        again = self.store.create(spec.kind, spec.entry, spec.name, params, files, spec.fetch)
+        again = actions.retry(self.store, job, changes)
         self.say(f"🔁 #{job} jeszcze raz jako <b>#{again.id}</b>.")
 
     def top_command(self, job, _rest=""):
-        if self.store.status(job).state != "queued":
-            return self.say(f"#{job} nie czeka w kolejce.")
-        self.store.set_priority(job, max(self.store.priorities().values(), default=0) + 1)
+        actions.top(self.store, job)
         self.say(f"⏫ #{job} będzie następne.")
 
     def remove_command(self, job, _rest=""):
@@ -543,6 +524,9 @@ class Bot:
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
+        for token in list(self.state["drafts"]):
+            if (self.store.root / "staging" / token / actions.STARTED).exists():
+                self.drop(token)  # started from the Mini App
         if changed:
             self.save()
 
@@ -666,15 +650,6 @@ class Bot:
             return self.say(f"❌ {esc(e)}")
         self.say("↩️ Wracam do poprzedniej wersji.")
         self.restart = True
-
-
-def _text(value):
-    """A stored parameter back as the owner would type it, so /retry can validate it again with changes."""
-    if isinstance(value, bool):
-        return "tak" if value else "nie"
-    if isinstance(value, list):
-        return ",".join(map(str, value))
-    return str(value)
 
 
 def log(message):
