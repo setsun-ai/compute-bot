@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from compute_bot import jobs
+from compute_bot import actions, jobs
 from compute_bot.bot import Bot
 
 OWNER = 100
@@ -465,7 +465,7 @@ def test_a_card_started_from_the_panel_leaves_the_chat_too(env, tmp_path):
     bot, api, store, _ = env
     upload(bot, api, "1e0l.pdb", b"ATOM")
     (token,) = bot.state["drafts"]
-    (tmp_path / "staging" / token / ".started").touch()
+    (tmp_path / "staging" / token / actions.CLOSED).touch()
     bot.tick()
     assert bot.state["drafts"] == {} and not (tmp_path / "staging" / token).exists()
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from . import jobs
 from .recipes import RECIPES, ParamError
 
 
@@ -52,13 +53,25 @@ def top(store, job):
     store.set_priority(job, max(store.priorities().values(), default=0) + 1)
 
 
-STARTED = ".started"  # a draft started from the Mini App; the bot drops it from bot.json on its next tick
+CLOSED = ".closed"  # a card started or discarded in the Mini App; the bot drops it from bot.json on its next tick
+
+
+def old_finished(store, days, now):
+    return [job for job, s in store.statuses().items()
+            if s.state in jobs.FINAL and s.finished and now - s.finished > days * 86400]
+
+
+def close_staged(folder):
+    folder = Path(folder)
+    if not folder.is_dir() or (folder / CLOSED).exists():
+        raise ParamError("Ta karta jest już uruchomiona albo nieaktualna.")
+    (folder / CLOSED).touch()
 
 
 def start_staged(store, folder, recipe, name, typed, fetch=()):
     """A recipe job from staged files (a card); a folder can be started once."""
     folder = Path(folder)
-    marker = folder / STARTED
+    marker = folder / CLOSED
     if not folder.is_dir() or marker.exists():
         raise ParamError("Ta karta jest już uruchomiona albo nieaktualna.")
     params = RECIPES[recipe].validate(typed)

@@ -101,8 +101,10 @@ class App:
     def state(self):
         beat = self.store.runner_state()
         alive = bool(beat) and self.clock() - beat.get("time", 0) < 180
-        return {"version": VERSION, "hold": self.store.hold, "system": self.system_info(),
-                "runner": {"alive": alive, **{k: beat.get(k) for k in ("job", "blocked", "free", "threads")}},
+        statuses = self.store.statuses()
+        return {"version": VERSION, "now": self.clock(), "hold": self.store.hold, "system": self.system_info(),
+                "max_attempts": jobs.MAX_ATTEMPTS, "queue": jobs.queue_order(statuses, self.store.priorities()),
+                "runner": {"alive": alive, **{k: beat.get(k) for k in ("time", "job", "blocked", "free", "threads")}},
                 "jobs": [job_json(self.store, spec) for spec in reversed(self.store.specs()[-50:])]}
 
     def job(self, job):
@@ -121,7 +123,7 @@ class App:
         except (OSError, ValueError):
             return {}
         return {token: d for token, d in state.get("drafts", {}).items()
-                if d.get("recipe") and not (self.store.root / "staging" / token / actions.STARTED).exists()}
+                if d.get("recipe") and not (self.store.root / "staging" / token / actions.CLOSED).exists()}
 
     # --- routing --------------------------------------------------------------------------------------
 
@@ -150,10 +152,23 @@ class App:
         if parts == ["hold"]:
             self.store.set_hold(bool(body.get("on")))
             return {"hold": self.store.hold}
+        if parts == ["cleanup"]:
+            old = actions.old_finished(self.store, float(body.get("days", 7)), self.clock())
+            for job in old:
+                self.store.remove(job)
+            return {"removed": old}
+        if len(parts) == 3 and parts[0] == "drafts" and parts[2] == "discard":
+            if parts[1] not in self.drafts():
+                raise FileExistsError
+            actions.close_staged(self.store.root / "staging" / parts[1])
+            return {"ok": True}
         if len(parts) == 3 and parts[0] == "drafts":
             return self.start_draft(parts[1], body)
         job = self.job_id(parts)
         action = parts[2:] and parts[2]
+        if action == "remove":
+            self.store.remove(job)
+            return {"ok": True}
         if action == "cancel":
             self.store.request_cancel(job)
             return {"ok": True}

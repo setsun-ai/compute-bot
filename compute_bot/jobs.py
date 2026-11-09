@@ -228,11 +228,16 @@ def _command(spec, python):
 
 # --- decisions (pure) ---------------------------------------------------------------------------------
 
-def next_job(statuses, priorities=None):
-    """The queued job with the highest priority; among equals the oldest."""
+def queue_order(statuses, priorities=None):
+    """Queued jobs in the order they will start: higher priority first, among equals the oldest."""
     priorities = priorities or {}
     queued = [job for job, status in statuses.items() if status.state == "queued"]
-    return min(queued, key=lambda job: (-priorities.get(job, 0), job)) if queued else None
+    return sorted(queued, key=lambda job: (-priorities.get(job, 0), job))
+
+
+def next_job(statuses, priorities=None):
+    order = queue_order(statuses, priorities)
+    return order[0] if order else None
 
 
 def recover(status):

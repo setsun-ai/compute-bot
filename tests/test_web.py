@@ -10,7 +10,7 @@ import urllib.request
 
 import pytest
 
-from compute_bot import jobs, web
+from compute_bot import actions, jobs, web
 
 TOKEN, OWNER = "123:abc", 100
 
@@ -156,7 +156,7 @@ def test_start_a_draft_from_the_panel_and_the_bot_cleans_up(server, tmp_path):
     spec = store.spec(made["id"])
     assert (spec.params["T"], spec.params["ns"]) == (450.0, 2.0)
     assert (store.work(made["id"]) / "1e0l.pdb").read_bytes() == b"ATOM"
-    assert (folder / ".started").exists()
+    assert (folder / actions.CLOSED).exists()
     assert call(base, "/api/drafts/777/start", {"params": {}})[0] == 409  # never twice
 
 
@@ -188,3 +188,36 @@ def test_rate_limit_follows_the_address_the_proxy_added_not_the_one_the_client_w
         except urllib.error.HTTPError as e:
             last = e.code
     assert last == 429
+
+
+def test_state_has_server_time_heartbeat_attempts_and_queue_order(server):
+    store, base, _ = server
+    for name in ("a.zip", "b.zip"):
+        store.create("script", "run.sh", name, {}, {"run.sh": b"true"})
+    store.set_priority(2, 1)
+    store.set_runner_state({"time": 123.0, "job": None, "blocked": ""})
+    _, state = call(base, "/api/state")
+    assert state["now"] > 0 and state["runner"]["time"] == 123.0 and state["max_attempts"] == jobs.MAX_ATTEMPTS
+    assert state["queue"] == [2, 1]
+
+
+def test_remove_a_finished_job_and_old_ones(server):
+    store, base, app = server
+    for _ in range(3):
+        store.create("script", "run.sh", "a.zip", {}, {"run.sh": b"true"})
+    store.set_status(1, jobs.Status("done", attempt=1, finished=app.clock() - 10 * 86400))
+    store.set_status(2, jobs.Status("done", attempt=1, finished=app.clock() - 3600))
+    assert call(base, "/api/jobs/3/remove", {})[0] == 400  # still queued
+    code, removed = call(base, "/api/cleanup", {"days": 7})
+    assert code == 200 and removed["removed"] == [1] and store.ids() == [2, 3]
+    assert call(base, "/api/jobs/2/remove", {})[0] == 200 and store.ids() == [3]
+
+
+def test_discard_a_card(server, tmp_path):
+    store, base, _ = server
+    (tmp_path / "staging" / "55").mkdir(parents=True)
+    (tmp_path / "bot.json").write_text(json.dumps({"drafts": {"55": {"recipe": "md", "name": "x", "params": {},
+                                                                     "fetch": []}}}))
+    assert call(base, "/api/drafts/55/discard", {})[0] == 200
+    assert call(base, "/api/drafts")[1] == {}
+    assert call(base, "/api/drafts/55/start", {"params": {}})[0] == 409

@@ -462,8 +462,7 @@ class Bot:
 
     def remove_old_command(self, days=7):
         now = self.clock()
-        old = [job for job, s in self.store.statuses().items()
-               if s.state in jobs.FINAL and s.finished and now - s.finished > days * 86400]
+        old = actions.old_finished(self.store, days, now)
         if not old:
             return self.say(f"Nie ma zadań skończonych ponad {days} dni temu.")
         size = sum(s for job in old for _, s in self.store.outputs(job))
@@ -548,7 +547,7 @@ class Bot:
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
         for token in list(self.state["drafts"]):
-            if (self.store.root / "staging" / token / actions.STARTED).exists():
+            if (self.store.root / "staging" / token / actions.CLOSED).exists():
                 self.drop(token)  # started from the Mini App
         if changed:
             self.save()
