@@ -777,7 +777,7 @@ def test_openmm_end_to_end_1l2y_kill_resume_extend(tmp_path):
     pytest.importorskip("openmm")
     pytest.importorskip("pdbfixer")
     pytest.importorskip("MDAnalysis")
-    env = dict(_recipe_env(), MD_CHECKPOINT_S="2")
+    env = dict(_recipe_env(), MD_CHECKPOINT_S="0.3")
     cmd = [sys.executable, "-m", "compute_bot.recipes.md"]
     work = tmp_path / "work"
     work.mkdir()
@@ -786,20 +786,13 @@ def test_openmm_end_to_end_1l2y_kill_resume_extend(tmp_path):
     (work / "params.json").write_text(json.dumps(p))
     odir = work / "openmm"
 
-    # run 1: killed hard (like a power cut) once production has a checkpoint
+    # run 1: killed hard (like a power cut) right after production's first checkpoint; the recipe does it to
+    # itself on a test-only switch, so a fast machine can't finish the run before the kill
     t0 = time.time()
-    proc = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            start_new_session=True)
-    seen = []
-    for line in proc.stdout:
-        seen.append(line)
-        if line.startswith("PROGRESS:") and "produkcja" in line and "krok" in line and (odir / "md.chk.xml").exists():
-            break
-    else:
-        proc.wait()
-        pytest.fail("production never checkpointed:\n" + "".join(seen[-40:]))
-    os.killpg(proc.pid, signal.SIGKILL)
-    proc.wait(timeout=60)
+    first = subprocess.run(cmd, cwd=work, env=dict(env, MD_TEST_CRASH_AFTER_CHECKPOINT="1"),
+                           capture_output=True, text=True, timeout=1800)
+    assert first.returncode == -signal.SIGKILL, first.stdout[-3000:] + first.stderr[-3000:]
+    assert (odir / "md.chk.xml").exists()
     t_first = time.time() - t0
     assert not (odir / "md.done.json").exists()
 

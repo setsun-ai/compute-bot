@@ -304,6 +304,7 @@ def run_dynamic(odir: Path, stage, start_state: Path, seed: int, prog: Progress,
     sim.reporters += [dcd, data]
     end = stage.first_step + stage.nsteps
     every = float(os.environ.get("MD_CHECKPOINT_S", "300"))
+    crash_after = os.environ.get("MD_TEST_CRASH_AFTER_CHECKPOINT") == "1"
     t0 = last = time.time()
 
     def checkpoint():
@@ -320,6 +321,8 @@ def run_dynamic(odir: Path, stage, start_state: Path, seed: int, prog: Progress,
             if flag["stop"] or time.time() - last >= every:
                 checkpoint()
                 last = time.time()
+                if crash_after and name == "md":  # tests only: a power cut right after a checkpoint
+                    os.kill(os.getpid(), signal.SIGKILL)
                 if flag["stop"]:
                     raise Interrupted(f"{stage.title} przerwany na kroku {sim.currentStep - stage.first_step}"
                                       f"/{stage.nsteps}, stan zapisany")
