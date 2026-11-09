@@ -70,6 +70,21 @@ def tap(bot, data):
                                                           "message": {"message_id": 9, "chat": {"id": OWNER}}}})
 
 
+def buttons(api, index=-1):
+    markup = api.sent("sendMessage")[index][1].get("reply_markup") or api.sent("editMessageText")[-1][1]["reply_markup"]
+    return [b for row in json.loads(markup)["inline_keyboard"] for b in row]
+
+
+def last_buttons(api):
+    calls = [c for c in api.calls if c[0] in ("sendMessage", "editMessageText") and c[1].get("reply_markup")]
+    return [b for row in json.loads(calls[-1][1]["reply_markup"])["inline_keyboard"] for b in row]
+
+
+def press(bot, api, label_start):
+    button = next(b for b in last_buttons(api) if b["text"].startswith(label_start))
+    tap(bot, button["callback_data"])
+
+
 def zip_bytes(files):
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as z:
@@ -103,6 +118,8 @@ def test_table_without_a_word_asks_and_a_tap_makes_the_job(env):
     choices = [b["callback_data"] for row in buttons for b in row]
     assert any(c.endswith(":qsar") for c in choices) and any(c.endswith(":omics") for c in choices)
     tap(bot, next(c for c in choices if c.endswith(":qsar")))
+    assert store.specs() == []  # a card first
+    press(bot, api, "▶️")
     (spec,) = store.specs()
     assert (spec.kind, spec.entry, spec.params["max_desc"]) == ("recipe", "qsar", 3)
     assert (store.work(1) / "dane.xlsx").read_bytes() == b"PK-xlsx"
@@ -118,6 +135,7 @@ def test_bad_parameter_is_explained_and_nothing_is_queued(env):
 def test_md_from_a_pdb_code(env):
     bot, api, store, _ = env
     bot.handle_update(message("/md 1E0L T=600 ns=0.5"))
+    press(bot, api, "▶️")
     (spec,) = store.specs()
     assert spec.entry == "md" and spec.params["pdb"] == "1E0L" and spec.params["T"] == 600.0
 
@@ -277,6 +295,7 @@ def test_top_moves_a_job_up(env):
 def test_retry_with_changed_parameters(env):
     bot, api, store, _ = env
     bot.handle_update(message("/md 1E0L T=600"))
+    press(bot, api, "▶️")
     store.set_status(1, jobs.Status("done", attempt=1))
     bot.handle_update(message("/retry 1 T=500 ns=2"))
     spec = store.spec(2)
@@ -311,6 +330,7 @@ def test_remove_old_finished_jobs(env):
 def test_link_makes_a_job_that_fetches_its_file(env):
     bot, api, store, _ = env
     bot.handle_update(message("/url https://drive.google.com/file/d/ABC/view omics group=grupa"))
+    press(bot, api, "▶️")
     (spec,) = store.specs()
     assert (spec.kind, spec.entry, spec.params["group"]) == ("recipe", "omics", "grupa")
     assert spec.fetch == [{"url": "https://drive.google.com/file/d/ABC/view", "name": "pobrany"}]
@@ -358,3 +378,76 @@ def test_results_come_with_buttons(env):
     summary_msg = next(c for c in api.sent("sendMessage") if "ok" in c[1]["text"])
     data = [b["callback_data"] for row in json.loads(summary_msg[1]["reply_markup"])["inline_keyboard"] for b in row]
     assert "j:1:retry" in data and "j:1:usun" in data
+
+
+# --- the parameter card --------------------------------------------------------------------------------
+
+def test_a_pdb_opens_a_card_and_nothing_runs_before_start(env):
+    bot, api, store, _ = env
+    upload(bot, api, "1e0l.pdb", b"ATOM", caption="T=600")
+    assert store.specs() == []
+    text = api.last_text()
+    assert "T" in text and "600" in text and "▶️" in "".join(b["text"] for b in last_buttons(api))
+
+
+def test_tapping_a_parameter_and_a_value_changes_it(env):
+    bot, api, store, _ = env
+    upload(bot, api, "1e0l.pdb", b"ATOM")
+    press(bot, api, "ns")
+    press(bot, api, "10")
+    assert "10" in api.calls[-1][1]["text"]
+    press(bot, api, "engine")
+    press(bot, api, "openmm")
+    press(bot, api, "▶️")
+    spec = store.spec(1)
+    assert (spec.params["ns"], spec.params["engine"]) == (10.0, "openmm")
+    assert (store.work(1) / "1e0l.pdb").read_bytes() == b"ATOM"
+
+
+def test_typing_key_value_edits_the_open_card(env):
+    bot, api, store, _ = env
+    bot.handle_update(message("/md 1E0L"))
+    bot.handle_update(message("T=450 ff=charmm27"))
+    assert "450" in api.last_text() and "charmm27" in api.last_text()
+    bot.handle_update(message("T=hot"))
+    assert "T=hot" in api.last_text()
+    press(bot, api, "▶️")
+    assert (store.spec(1).params["T"], store.spec(1).params["ff"]) == (450.0, "charmm27")
+
+
+def test_cancel_drops_the_card_and_its_files(env, tmp_path):
+    bot, api, store, _ = env
+    upload(bot, api, "1e0l.pdb", b"ATOM")
+    press(bot, api, "✖️")
+    assert store.specs() == [] and not any((tmp_path / "staging").iterdir())
+
+
+def test_scripts_skip_the_card(env):
+    bot, api, store, _ = env
+    upload(bot, api, "a.zip", zip_bytes({"run.sh": "true"}))
+    assert len(store.specs()) == 1
+
+
+def test_continue_a_finished_md_run(env):
+    bot, api, store, _ = env
+    bot.handle_update(message("/md 1E0L ns=1"))
+    press(bot, api, "▶️")
+    store.set_status(1, jobs.Status("done", attempt=1))
+    bot.handle_update(message("/dolicz 1 5"))
+    spec = store.spec(2)
+    assert spec.params["extend_ns"] == 5.0 and spec.params["pdb"] == "1E0L"
+
+
+def test_continue_needs_a_finished_md_job(env):
+    bot, api, store, _ = env
+    upload(bot, api, "a.zip", zip_bytes({"run.sh": "true"}))
+    bot.handle_update(message("/dolicz 1 5"))
+    assert "md" in api.last_text() and len(store.specs()) == 1
+
+
+def test_namd_tarball_installs_without_questions(env):
+    bot, api, store, _ = env
+    name = "NAMD_3.0.1_Linux-x86_64-multicore.tar.gz"
+    upload(bot, api, name, b"tar")
+    (spec,) = store.specs()
+    assert (spec.kind, spec.entry) == ("tool", "namd")

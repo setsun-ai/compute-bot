@@ -124,6 +124,10 @@ RECIPES = {r.name: r for r in (
             "seed": Param("int", -1, "ziarno prędkości (-1 = losowe)"),
             "ensemble": Param("choice", "npt", "produkcja w NPT czy NVT (NVT lepsze do rozwijania w wysokiej T)",
                               ("npt", "nvt")),
+            "engine": Param("choice", "gromacs", "silnik", ("gromacs", "openmm")),
+            "mdp": Param("str", "", "zmienione opcje produkcji, np. nstxout-compressed=500;tcoupl=nose-hoover"),
+            "extend_ns": Param("float", 0.0, "dolicz tyle ns do skończonej produkcji (ustawia /dolicz)",
+                               low=0, high=1000),
         },
         inputs=(".pdb", ".cif"), needs_file=False),
     Recipe(
@@ -200,7 +204,45 @@ RECIPES = {r.name: r for r in (
         },
         inputs=(".zip", ".sdf", ".smi", ".csv", ".tsv", ".mol2", ".pdb", ".cif"), needs_file=False),
     Recipe(
+        "charmm", "Paczka z CHARMM-GUI",
+        "Zip pobrany z CHARMM-GUI (Solution Builder itp.): bot znajduje folder gromacs/, openmm/ albo namd/ i "
+        "uruchamia protokół z README tej paczki (minimalizacja, równowagowanie, produkcja), wznawiając po "
+        "przerwie, a potem tę samą analizę co md.",
+        {
+            "engine": Param("choice", "auto", "który folder paczki (auto = gromacs, potem openmm, potem namd)",
+                            ("auto", "gromacs", "openmm", "namd")),
+            "ns": Param("float", 0.0, "długość produkcji [ns] (0 = jak w paczce)", low=0, high=1000),
+            "T": Param("float", 0.0, "temperatura [K] (0 = jak w paczce)", low=0, high=1000),
+            "steps": Param("str", "", "które kroki, np. 4,5 (puste = wszystkie z README)"),
+        },
+        inputs=(".zip", ".tgz", ".gz")),
+    Recipe(
         "env", "Aktualizacja środowiska",
         "Doinstalowuje pakiety z deploy/environment.yml do środowiska conda (po aktualizacji bota).",
         {}, needs_file=False),
 )}
+
+# Values offered as buttons on the parameter card (choice and bool parameters offer all their values anyway).
+# Parameters not named here and not choice/bool are changed by typing key=value.
+QUICK = {
+    "md": {"engine": (), "ff": (), "T": (300, 310, 350, 400, 500, 600), "ns": (0.1, 0.5, 1, 5, 10, 50),
+           "ensemble": (), "salt": (0, 0.1, 0.15, 0.5)},
+    "qsar": {"split": (), "select": (), "max_desc": (2, 3, 4, 5, 6, 8), "every": (2, 3, 4, 5)},
+    "omics": {"layer": (), "normalize": (), "impute": (), "drift": (), "test": (), "fdr": (0.01, 0.05, 0.1),
+              "annotate": (), "enrich": ()},
+    "dock": {"scoring": (), "exhaustiveness": (4, 8, 16, 32), "poses": (5, 9, 20), "padding": (4, 6, 8)},
+    "charmm": {"engine": (), "ns": (0, 1, 5, 10, 50), "T": (0, 300, 310, 600)},
+}
+
+
+def quick_values(recipe, name):
+    """The button values for one parameter of the card, as the owner would type them."""
+    param = RECIPES[recipe].params[name]
+    given = QUICK.get(recipe, {}).get(name, ())
+    if given:
+        return [f"{v:g}" if isinstance(v, float) else str(v) for v in given]
+    if param.kind == "choice":
+        return list(param.choices)
+    if param.kind == "bool":
+        return ["tak", "nie"]
+    return []

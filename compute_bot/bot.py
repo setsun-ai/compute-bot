@@ -19,7 +19,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, jobs
+from . import VERSION, drafts, jobs
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
 
@@ -103,8 +103,8 @@ class Bot:
         self.restart = False
         fresh = not self.state_path.exists()
         self.local_hour = lambda: time.localtime(self.clock()).tm_hour
-        self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "pending": {}, "quiet": [23, 7],
-                      "runner_alert": ""}
+        self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "drafts": {}, "open_draft": None,
+                      "quiet": [23, 7], "runner_alert": ""}
         if not fresh:
             self.state.update(json.loads(self.state_path.read_text()))
         else:  # first start (or lost state): don't repeat news about old jobs
@@ -160,6 +160,8 @@ class Bot:
             text = (msg.get("text") or "").strip()
             if text.startswith("/"):
                 return self.handle_command(text)
+            if "=" in text:
+                return self.edit_open_draft(text)
             self.say("Wyślij plik albo komendę. /help pokaże, co umiem.")
         except ParamError as e:
             self.say(f"❌ {esc(e)}")
@@ -168,7 +170,8 @@ class Bot:
         name = jobs.safe_name(document.get("file_name") or "plik")
         if (document.get("file_size") or 0) > MAX_DOWNLOAD:
             return self.say(f"❌ {esc(name)} ma {size_text(document['file_size'])}, a bot może pobrać najwyżej "
-                            "20 MB. Spakuj mniej albo dodaj do zipa run.sh, który pobierze duże pliki (wget/curl).")
+                            "20 MB. Wyślij link: <code>/url LINK …</code> (Drive, Dropbox), plik pobierze się "
+                            "w zadaniu.")
         word, params = jobs.parse_caption(caption)
         try:
             data = self.api.download(document["file_id"])
@@ -179,20 +182,92 @@ class Bot:
         if found is None:
             return self.ask_what(name, caption, files)
         kind, entry = found
+        if kind == "recipe":
+            return self.open_draft(entry, name, params, files)
         self.queue(kind, entry, name, params, files)
 
-    def ask_what(self, name, caption, files):
+    # --- files waiting for a decision (staging/<token>/, drafts in bot.json) ---------------------------
+
+    def stage(self, files):
         token = f"{int(self.clock() * 1000) % 10 ** 9}"
+        while token in self.state["drafts"]:
+            token = str(int(token) + 1)
         folder = self.store.root / "staging" / token
+        folder.mkdir(parents=True, exist_ok=True)
         for rel, data in files.items():
             (folder / rel).parent.mkdir(parents=True, exist_ok=True)
             (folder / rel).write_bytes(data)
-        self.state["pending"][token] = {"name": name, "caption": caption or ""}
+        return token
+
+    def staged(self, token):
+        folder = self.store.root / "staging" / token
+        return {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
+
+    def drop(self, token):
+        self.state["drafts"].pop(token, None)
+        if self.state.get("open_draft") == token:
+            self.state["open_draft"] = None
+        self.save()
+        shutil.rmtree(self.store.root / "staging" / token, ignore_errors=True)
+
+    def ask_what(self, name, caption, files):
+        token = self.stage(files)
+        self.state["drafts"][token] = {"recipe": None, "name": name, "caption": caption or ""}
         self.save()
         suffix = PurePosixPath(name).suffix.lower()
         options = [r for r in RECIPES.values() if suffix in r.inputs] or [r for r in RECIPES.values() if r.inputs]
         rows = [[(r.title, f"f:{token}:{r.name}")] for r in options] + [[("✖️ Nic", f"f:{token}:-")]]
         self.say(f"Co zrobić z <b>{esc(name)}</b>?", keyboard(rows))
+
+    def open_draft(self, recipe, name, typed, files=None, fetch=(), token=None):
+        """A recipe job waits on a card until Start; env needs no choices and goes straight in."""
+        if recipe == "env":
+            return self.queue("recipe", "env", name, typed, {})
+        draft = drafts.new(recipe, name, typed, fetch)
+        token = token or self.stage(files or {})
+        self.state["drafts"][token] = draft
+        self.state["open_draft"] = token
+        self.save()
+        self.say(*drafts.card(token, draft))
+
+    def show(self, message_id, text, markup):
+        try:
+            self.api("editMessageText", {"chat_id": self.owner, "message_id": message_id, "text": text,
+                                         "parse_mode": "HTML", "reply_markup": markup})
+        except TelegramError:  # too old to edit, or unchanged: a new message does the job
+            self.say(text, markup)
+
+    def draft_tap(self, action, token, rest, message_id):
+        draft = self.state["drafts"].get(token)
+        if draft is None or draft.get("recipe") is None:
+            return self.say("Ta karta już nie jest aktualna. Wyślij plik jeszcze raz.")
+        if action == "c":
+            self.drop(token)
+            return self.show(message_id, "✖️ Anulowane.", keyboard([]))
+        if action == "s":
+            spec = self.queue("recipe", draft["recipe"], draft["name"], draft["params"], self.staged(token),
+                              draft["fetch"])
+            if spec is not None:
+                self.drop(token)
+            return
+        if action == "p":
+            return self.show(message_id, *drafts.choices(token, draft, rest[0]))
+        if action == "v":
+            draft = drafts.choose(draft, rest[0], int(rest[1]))
+            self.state["drafts"][token] = draft
+            self.state["open_draft"] = token
+            self.save()
+        self.show(message_id, *drafts.card(token, draft))
+
+    def edit_open_draft(self, text):
+        token = self.state.get("open_draft")
+        draft = self.state["drafts"].get(token) if token else None
+        if not draft or draft.get("recipe") is None:
+            return self.say("Nie ma otwartej karty do zmiany. Wyślij plik albo komendę (/help).")
+        draft = drafts.edit_text(draft, text)
+        self.state["drafts"][token] = draft
+        self.save()
+        self.say(*drafts.card(token, draft))
 
     def queue(self, kind, entry, name, params, files, fetch=()):
         if kind == "recipe":
@@ -209,33 +284,37 @@ class Bot:
         spec = self.store.create(kind, entry, name, params, files, fetch)
         ahead = sum(1 for job, s in self.store.statuses().items() if job != spec.id and s.state not in jobs.FINAL)
         where = "zaraz startuje" if not ahead else f"przed nim: {ahead}"
-        what = RECIPES[entry].title if kind == "recipe" else {"script": "skrypt run.sh", "tpr": "mdrun",
-                                                              "notebook": "notebook", "python": "skrypt Python"}[kind]
+        what = RECIPES[entry].title if kind == "recipe" else {
+            "script": "skrypt run.sh", "tpr": "mdrun", "notebook": "notebook", "python": "skrypt Python",
+            "tool": "instalacja NAMD"}[kind]
         self.say(f"📥 <b>#{spec.id}</b> {esc(name)} – {esc(what)} w kolejce ({where}).")
         return spec
 
     def handle_tap(self, data, message_id):
-        parts = data.split(":")
-        if parts[0] == "f" and len(parts) == 3:
-            token, choice = parts[1], parts[2]
-            pending = self.state["pending"].pop(token, None)
-            self.save()
-            folder = self.store.root / "staging" / token
-            if pending is None or not folder.exists():
-                return self.say("Ten plik już nie czeka. Wyślij go jeszcze raz.")
-            files = {str(p.relative_to(folder)): p.read_bytes() for p in folder.rglob("*") if p.is_file()}
-            shutil.rmtree(folder, ignore_errors=True)
-            if choice == "-":
-                return self.say("Dobrze, nic nie robię.")
-            try:
-                _, params = jobs.parse_caption(pending["caption"])
-                self.queue("recipe", choice, pending["name"], params, files)
-            except ParamError as e:
-                self.say(f"❌ {esc(e)}")
-        elif parts[0] == "j" and len(parts) == 3 and parts[1].isdigit():
-            self.handle_command(f"/{parts[2]} {parts[1]}")
-        elif parts[0] == "d" and len(parts) == 2:
-            self.remove_confirmed(parts[1])
+        action, _, rest = data.partition(":")
+        parts = rest.split(":")
+        try:
+            if action == "f" and len(parts) == 2:
+                return self.chosen(parts[0], parts[1])
+            if action in ("p", "v", "s", "c", "b"):
+                return self.draft_tap(action, parts[0], parts[1:], message_id)
+            if action == "j" and len(parts) == 2 and parts[0].isdigit():
+                return self.handle_command(f"/{parts[1]} {parts[0]}")
+            if action == "d" and len(parts) == 1:
+                return self.remove_confirmed(parts[0])
+        except ParamError as e:
+            self.say(f"❌ {esc(e)}")
+
+    def chosen(self, token, choice):
+        """The owner said what an ambiguous file is for: a card for that recipe, or nothing."""
+        pending = self.state["drafts"].get(token)
+        if pending is None or pending.get("recipe") is not None:
+            return self.say("Ten plik już nie czeka. Wyślij go jeszcze raz.")
+        if choice == "-":
+            self.drop(token)
+            return self.say("Dobrze, nic nie robię.")
+        _, typed = jobs.parse_caption(pending["caption"])
+        self.open_draft(choice, pending["name"], typed, token=token)
 
     def handle_command(self, text):
         word, _, rest = text.partition(" ")
@@ -246,6 +325,7 @@ class Bot:
                    "pomoc": self.help_command, "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
+                   "dolicz": self.extend_command,
                    "update": self.update_command, "rollback": self.rollback_command}
         if word in general:
             return general[word](rest)
@@ -270,7 +350,7 @@ class Bot:
             return self.say(f"{esc(recipe.title)}: wyślij plik z podpisem <code>{word} …</code> albo link: "
                             f"<code>/url LINK {word} …</code>.\n\n" + recipe.usage())
         _, params = jobs.parse_caption(text)
-        self.queue("recipe", word, word if word == "env" else f"{word} {rest}".strip(), params, {})
+        self.open_draft(word, word if word == "env" else f"{word} {rest}".strip(), params)
 
     def system_command(self, _rest=""):
         beat = self.store.runner_state()
@@ -318,7 +398,24 @@ class Bot:
                             "pobierze się w zadaniu, więc może być duży.")
         word, params = jobs.parse_caption(caption)
         kind, entry, name = jobs.detect_url(link, word)
-        self.queue(kind, entry, name, params, {}, fetch=[{"url": link, "name": name}])
+        fetch = [{"url": link, "name": name}]
+        if kind == "recipe":
+            return self.open_draft(entry, name, params, fetch=fetch)
+        self.queue(kind, entry, name, params, {}, fetch=fetch)
+
+    def extend_command(self, rest):
+        """/dolicz N NS: a finished md run goes on for NS more nanoseconds, sharing its files (hard links)."""
+        words = rest.replace(",", ".").split()
+        if len(words) != 2 or not words[0].isdigit() or int(words[0]) not in self.store.ids():
+            return self.say("Użycie: /dolicz N ILE_NS, np. /dolicz 4 5 – zadanie #4 o 5 ns dłużej.")
+        job = int(words[0])
+        spec, status = self.store.spec(job), self.store.status(job)
+        if spec.kind != "recipe" or spec.entry != "md" or status.state != "done":
+            return self.say(f"/dolicz działa dla skończonych zadań md; #{job} to {esc(spec.name)} ({status.state}).")
+        typed = {k: _text(v) for k, v in spec.params.items() if v not in (None, "", [])}
+        params = RECIPES["md"].validate({**typed, "extend_ns": words[1]})
+        child = self.store.create_from(job, params)
+        self.say(f"➕ <b>#{child.id}</b>: #{job} o {params['extend_ns']:g} ns dłużej, w kolejce.")
 
     def log_command(self, job, _rest=""):
         self.say(f"📜 <b>#{job}</b>\n<pre>{esc(self.store.log_tail(job, 3500))}</pre>")

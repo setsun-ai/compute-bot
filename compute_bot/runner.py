@@ -100,7 +100,9 @@ class Runner:
     def environment(self):
         env = {k: v for k, v in os.environ.items() if not k.startswith("TG_")}  # a job never sees the token
         python_bin = str(Path(self.python).parent)
-        env["PATH"] = os.pathsep.join([str(BIN), python_bin, env.get("PATH", "/usr/bin:/bin")])
+        tools = str(self.store.root / "tools" / "bin")  # NAMD and others the owner installed (compute_bot.tools)
+        env["PATH"] = os.pathsep.join([str(BIN), tools, python_bin, env.get("PATH", "/usr/bin:/bin")])
+        env["COMPUTE_HOME"] = str(self.store.root)
         env["PYTHONPATH"] = str(APP)
         threads = str(self.threads)
         env.update(COMPUTE_THREADS=threads, OMP_NUM_THREADS=threads, OPENBLAS_NUM_THREADS=threads,

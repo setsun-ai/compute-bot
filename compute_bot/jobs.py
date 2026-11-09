@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import shutil
+import tarfile
 import time
 import urllib.parse
 import zipfile
@@ -82,9 +83,15 @@ def parse_caption(text):
     return recipe, params
 
 
+TARBALLS = (".tgz", ".tar.gz", ".tar")
+
+
 def unpack(filename, data):
-    """The files of an upload: a zip is unpacked (without a folder common to all), anything else is itself."""
-    if not filename.lower().endswith(".zip"):
+    """The files of an upload: a zip or tarball is unpacked (without a folder common to all), the rest is itself."""
+    lowered = filename.lower()
+    if lowered.endswith(TARBALLS) and not is_namd(filename):
+        return unpack_tar(data)
+    if not lowered.endswith(".zip"):
         return {safe_name(filename): data}
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -93,22 +100,45 @@ def unpack(filename, data):
     return {target: archive.read(member) for member, target in zip_layout(archive).items()}
 
 
+def unpack_tar(data):
+    try:
+        archive = tarfile.open(fileobj=io.BytesIO(data))
+        members = archive.getmembers()
+    except tarfile.TarError:
+        raise ParamError("To nie jest poprawne archiwum tar/tgz.") from None
+    files = [m for m in members if m.isfile()]
+    if any(not (m.isfile() or m.isdir()) for m in members):
+        raise ParamError("W archiwum są dowiązania albo pliki specjalne; spakuj same pliki.")
+    if sum(m.size for m in files) > MAX_UNPACKED:
+        raise ParamError("Archiwum po rozpakowaniu ma ponad 2 GB.")
+    targets = strip_common_top([PurePosixPath(m.name) for m in files])
+    return {target: archive.extractfile(m).read() for m, target in zip(files, targets, strict=True)}
+
+
+def strip_common_top(paths):
+    """Safe relative targets for archive paths, without a folder that holds everything."""
+    for path in paths:
+        if path.is_absolute() or ".." in path.parts:
+            raise ParamError(f"Niebezpieczna ścieżka w archiwum: {path}")
+    if not paths:
+        raise ParamError("Archiwum jest puste.")
+    top = {p.parts[0] for p in paths}
+    strip = len(top) == 1 and all(len(p.parts) > 1 for p in paths)
+    return [str(PurePosixPath(*p.parts[1:])) if strip else str(p) for p in paths]
+
+
+def is_namd(filename):
+    return bool(re.match(r"NAMD_[\d.]+.*Linux-x86_64.*\.tar\.gz$", PurePosixPath(filename).name))
+
+
 def zip_layout(archive):
     """Member → where it goes: no absolute or ../ paths, no macOS junk, no folder common to all files."""
     members = [m for m in archive.infolist() if not m.is_dir() and not m.filename.startswith("__MACOSX/")
                and not PurePosixPath(m.filename).name.startswith("._")]
     if sum(m.file_size for m in members) > MAX_UNPACKED:
         raise ParamError("Zip po rozpakowaniu ma ponad 2 GB.")
-    paths = [PurePosixPath(m.filename) for m in members]
-    for path in paths:
-        if path.is_absolute() or ".." in path.parts:
-            raise ParamError(f"Niebezpieczna ścieżka w zipie: {path}")
-    top = {p.parts[0] for p in paths}
-    strip = len(top) == 1 and all(len(p.parts) > 1 for p in paths)
-    layout = {m: str(PurePosixPath(*p.parts[1:])) if strip else str(p) for m, p in zip(members, paths, strict=True)}
-    if not layout:
-        raise ParamError("Zip jest pusty.")
-    return layout
+    targets = strip_common_top([PurePosixPath(m.filename) for m in members])
+    return dict(zip(members, targets, strict=True))
 
 
 def safe_name(filename):
@@ -121,14 +151,21 @@ def safe_name(filename):
 SINGLE = {".tpr": "tpr", ".ipynb": "notebook", ".py": "python"}
 
 
+CHARMM_MARKERS = ("gromacs/README", "openmm/openmm_run.py", "namd/README")
+
+
 def detect(filename, recipe_word, files):
     """(kind, entry) for an upload, or None when only the owner can say what a table is for."""
+    if is_namd(filename) and recipe_word is None:
+        return "tool", "namd"
     if recipe_word is not None:
         if recipe_word not in RECIPES:
             raise ParamError(f"Nie znam „{recipe_word}”. Są: {', '.join(RECIPES)}.")
         return "recipe", recipe_word
     if "run.sh" in files:
         return "script", "run.sh"
+    if any(marker in files for marker in CHARMM_MARKERS):
+        return "recipe", "charmm"
     if len(files) == 1:
         (name,) = files
         suffix = PurePosixPath(name).suffix.lower()
@@ -184,6 +221,8 @@ def _command(spec, python):
                 "--ExecutePreprocessor.timeout=-1", "--output", out, spec.entry]
     if spec.kind == "recipe":
         return [python, "-m", f"compute_bot.recipes.{spec.entry}"]
+    if spec.kind == "tool":
+        return [python, "-m", "compute_bot.tools", spec.entry, spec.name]
     raise ValueError(spec.kind)
 
 
@@ -255,14 +294,24 @@ class Store:
             return []
         return sorted(int(p.name) for p in self.jobs.iterdir() if p.name.isdigit() and (p / "spec.json").exists())
 
+    def new_slot(self):
+        """The next number and its temporary directory; mkdir fails on a collision, so two creators never share one."""
+        self.jobs.mkdir(parents=True, exist_ok=True)
+        while True:
+            taken = [int(p.name.split(".")[0]) for p in self.jobs.iterdir() if p.name.split(".")[0].isdigit()]
+            job = max(taken, default=0) + 1
+            tmp = self.jobs / f"{job:04d}.tmp"
+            try:
+                tmp.mkdir()
+                return job, tmp
+            except FileExistsError:
+                continue
+
     def create(self, kind, entry, name, params, files, fetch=()):
         """The directory gets its final name only when everything is in it: the runner never sees half a job."""
-        self.jobs.mkdir(parents=True, exist_ok=True)
-        taken = [int(p.name.split(".")[0]) for p in self.jobs.iterdir() if p.name.split(".")[0].isdigit()]
-        job = max(taken, default=0) + 1
-        tmp = self.jobs / f"{job:04d}.tmp"
+        job, tmp = self.new_slot()
         work = tmp / "work"
-        work.mkdir(parents=True)
+        work.mkdir()
         for folder in (tmp / "input", work):  # input/ stays as sent, for /retry
             for rel, data in files.items():
                 target = folder / rel
@@ -276,6 +325,27 @@ class Store:
         write_json(tmp / "spec.json", spec._asdict())
         os.replace(tmp, self.dir(job))
         return spec
+
+    def create_from(self, parent, params):
+        """A continuation of a finished job: its work/ hard-linked (no copies), new parameters, same recipe.
+        The job must write new files instead of changing linked ones."""
+        spec = self.spec(parent)
+        job, tmp = self.new_slot()
+        source = self.work(parent)
+        (tmp / "work").mkdir()
+        for path in source.rglob("*"):
+            target = tmp / "work" / path.relative_to(source)
+            if path.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+            elif path.name != "params.json":
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.link(path, target)
+        (tmp / "input").mkdir(parents=True, exist_ok=True)
+        write_json(tmp / "work" / "params.json", params)
+        child = Spec(job, spec.kind, spec.entry, f"{spec.name} (ciąg #{parent})", params, time.time())
+        write_json(tmp / "spec.json", child._asdict())
+        os.replace(tmp, self.dir(job))
+        return child
 
     def inputs(self, job):
         folder = self.dir(job) / "input"

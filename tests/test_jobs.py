@@ -198,3 +198,56 @@ def test_finished_job_can_be_removed_a_running_one_cannot(tmp_path):
     store.set_status(1, jobs.Status("done", attempt=1))
     store.remove(1)
     assert store.ids() == []
+
+
+# --- engines and packages --------------------------------------------------------------------------------
+
+def tgz_bytes(files, extra=None):
+    import tarfile
+    out = io.BytesIO()
+    with tarfile.open(fileobj=out, mode="w:gz") as archive:
+        for name, data in files.items():
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
+        if extra:
+            archive.addfile(extra)
+    return out.getvalue()
+
+
+def test_charmm_gui_tgz_is_unpacked_and_recognised():
+    files = jobs.unpack("charmm-gui.tgz", tgz_bytes({"charmm-gui-123/gromacs/README": b"gmx grompp",
+                                                     "charmm-gui-123/gromacs/step5_production.mdp": b"",
+                                                     "charmm-gui-123/toppar/x.rtf": b""}))
+    assert "gromacs/README" in files
+    assert jobs.detect("charmm-gui.tgz", None, files) == ("recipe", "charmm")
+
+
+def test_tar_with_links_or_escapes_is_refused():
+    import tarfile
+    link = tarfile.TarInfo("a/evil")
+    link.type, link.linkname = tarfile.SYMTYPE, "/etc/passwd"
+    with pytest.raises(ParamError):
+        jobs.unpack("x.tgz", tgz_bytes({"a/ok.txt": b"x"}, extra=link))
+    with pytest.raises(ParamError):
+        jobs.unpack("x.tar.gz", tgz_bytes({"../up.txt": b"x"}))
+
+
+def test_namd_download_becomes_an_install_job():
+    name = "NAMD_3.0.1_Linux-x86_64-multicore.tar.gz"
+    assert jobs.detect(name, None, {name: b""}) == ("tool", "namd")
+    spec = jobs.Spec(1, "tool", "namd", name, {}, 0)
+    assert jobs.command(spec, "/e/python") == ["/e/python", "-m", "compute_bot.tools", "namd", name]
+
+
+def test_a_continuation_shares_the_parents_files_without_copying(tmp_path):
+    store = jobs.Store(tmp_path)
+    parent = store.create("recipe", "md", "1E0L", {"pdb": "1E0L"}, {}).id
+    (store.work(parent) / "gromacs").mkdir()
+    (store.work(parent) / "gromacs/md.xtc").write_bytes(b"traj")
+    child = store.create_from(parent, {"pdb": "1E0L", "extend_ns": 5.0}).id
+    linked = store.work(child) / "gromacs/md.xtc"
+    assert linked.read_bytes() == b"traj"
+    assert linked.stat().st_ino == (store.work(parent) / "gromacs/md.xtc").stat().st_ino
+    assert jobs.json.loads((store.work(child) / "params.json").read_text())["extend_ns"] == 5.0
+    assert store.spec(child).name.startswith("1E0L")
