@@ -429,6 +429,10 @@ class Bot:
     def retry_command(self, job, rest=""):
         """The same files again; key=value after the number changes those parameters."""
         spec = self.store.spec(job)
+        files = self.store.inputs(job)
+        if not files and not spec.fetch and spec.kind != "recipe":
+            return self.say(f"#{job} przyszło z terminala i jego pliki nie są trzymane drugi raz: "
+                            f"<code>compute submit …</code> jeszcze raz.")
         _, changes = jobs.parse_caption(rest)
         params = dict(spec.params)
         if changes:
@@ -436,7 +440,7 @@ class Bot:
                 raise ParamError("Zmiana parametrów działa tylko dla przepisów.")
             params = RECIPES[spec.entry].validate({**{k: _text(v) for k, v in spec.params.items()
                                                       if v not in (None, "", [])}, **changes})
-        again = self.store.create(spec.kind, spec.entry, spec.name, params, self.store.inputs(job), spec.fetch)
+        again = self.store.create(spec.kind, spec.entry, spec.name, params, files, spec.fetch)
         self.say(f"🔁 #{job} jeszcze raz jako <b>#{again.id}</b>.")
 
     def top_command(self, job, _rest=""):

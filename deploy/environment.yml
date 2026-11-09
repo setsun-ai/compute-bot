@@ -29,6 +29,8 @@ dependencies:
   # notebooks
   - nbconvert
   - ipykernel
+  - jupyterlab
+  - pyarrow  # DIA-NN report.parquet
   - pip
   - pip:
       - mordredcommunity

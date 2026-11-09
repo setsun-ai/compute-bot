@@ -182,7 +182,7 @@ RECIPES = {r.name: r for r in (
             "enrich": Param("bool", True, "wzbogacenie GO/KEGG/Reactome przez g:Profiler (internet)"),
             "organism": Param("str", "hsapiens", "organizm dla g:Profiler"),
         },
-        inputs=(".tsv", ".csv", ".txt", ".xlsx", ".zip")),
+        inputs=(".tsv", ".csv", ".txt", ".xlsx", ".zip", ".parquet")),
     Recipe(
         "dock", "Dokowanie (AutoDock Vina)",
         "Receptor (PDB albo kod) + ligandy (SMILES w csv/smi albo sdf). Przygotowuje białko i ligandy (pH, 3D, "

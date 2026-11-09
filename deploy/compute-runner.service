@@ -14,7 +14,8 @@ Environment=PATH=/opt/compute-bot/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 /opt/compute-bot/app/launch.py runner
 Restart=always
 RestartSec=15
-UMask=0077
+# Group compute (the owner's login too) shares the jobs: see deploy/remote.sh.
+UMask=0007
 
 # Game servers and the other bots on this laptop always come first.
 Nice=19

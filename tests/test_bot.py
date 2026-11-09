@@ -451,3 +451,11 @@ def test_namd_tarball_installs_without_questions(env):
     upload(bot, api, name, b"tar")
     (spec,) = store.specs()
     assert (spec.kind, spec.entry) == ("tool", "namd")
+
+
+def test_retry_of_a_terminal_job_without_kept_files_says_so(env):
+    bot, api, store, _ = env
+    store.create("script", "run.sh", "1E0L", {}, {"run.sh": b"true"}, keep_input=False)
+    store.set_status(1, jobs.Status("failed", attempt=1))
+    bot.handle_update(message("/retry 1"))
+    assert len(store.specs()) == 1 and "terminal" in api.last_text()

@@ -11,7 +11,8 @@ Environment=COMPUTE_HOME=/var/lib/compute-bot
 ExecStart=/usr/bin/python3 /opt/compute-bot/app/launch.py bot
 Restart=always
 RestartSec=10
-UMask=0077
+# Group compute (the owner's login too) shares the jobs: see deploy/remote.sh.
+UMask=0007
 Nice=5
 MemoryMax=400M
 

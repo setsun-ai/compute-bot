@@ -20,7 +20,12 @@ apt-get install -y -qq python3 curl ca-certificates bzip2 >/dev/null
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 10))' || { echo "Potrzebny Python ≥ 3.10."; exit 1; }
 
 id compute >/dev/null 2>&1 || useradd --system --home-dir "$HOME_DIR" --shell /usr/sbin/nologin compute
-install -d -o compute -g compute -m 700 "$HOME_DIR"
+# setgid: everything inside stays in group compute, so the owner's login (added below) can read results and
+# submit from a terminal (compute submit ...), while the services keep their own user.
+install -d -o compute -g compute -m 2770 "$HOME_DIR"
+if [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+  usermod -aG compute "$SUDO_USER"
+fi
 
 free_gb=$(df -Pk "$HOME_DIR" | awk 'NR==2 {print int($4 / 1048576)}')
 if [ ! -d "$ENV_PREFIX" ] && [ "$free_gb" -lt 6 ]; then
@@ -81,6 +86,8 @@ if [ ! -f "$RUNNER_ENV" ]; then
   printf 'COMPUTE_THREADS=%s\n' "$(nproc)" > "$RUNNER_ENV"
 fi
 
+install -m 755 "$OPT/app/deploy/compute" /usr/local/bin/compute
+install -m 644 "$OPT/app/deploy/profile.sh" /etc/profile.d/compute-bot.sh
 install -m 644 "$OPT/app/deploy/compute-bot.service" "$OPT/app/deploy/compute-runner.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable -q compute-bot compute-runner
@@ -89,6 +96,8 @@ sleep 3
 if systemctl is-active --quiet compute-bot && systemctl is-active --quiet compute-runner; then
   echo "Gotowe. Wersja $(cd "$OPT/app" && python3 -m compute_bot --version), wątków: $(cut -d= -f2 "$RUNNER_ENV")."
   echo "Wyślij botowi /help. Liczbę wątków zmienisz w $RUNNER_ENV (potem: systemctl restart compute-runner)."
+  echo "W terminalu: compute jobs, compute submit FOLDER, compute-env (środowisko). Po pierwszej instalacji"
+  echo "zaloguj się ponownie, żeby grupa compute zadziałała. Dostęp zdalny: sudo bash deploy/remote.sh"
 else
   journalctl -u compute-bot -u compute-runner -n 20 --no-pager || true
   exit 1

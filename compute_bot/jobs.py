@@ -307,16 +307,21 @@ class Store:
             except FileExistsError:
                 continue
 
-    def create(self, kind, entry, name, params, files, fetch=()):
+    def create(self, kind, entry, name, params, files, fetch=(), keep_input=True):
         """The directory gets its final name only when everything is in it: the runner never sees half a job."""
         job, tmp = self.new_slot()
         work = tmp / "work"
         work.mkdir()
-        for folder in (tmp / "input", work):  # input/ stays as sent, for /retry
-            for rel, data in files.items():
+        (tmp / "input").mkdir()
+        folders = (tmp / "input", work) if keep_input else (work,)  # input/ stays as sent, for /retry
+        for folder in folders:
+            for rel, data in files.items():  # bytes from Telegram, or a Path from the terminal (copied)
                 target = folder / rel
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(data)
+                if isinstance(data, Path):
+                    shutil.copyfile(data, target)
+                else:
+                    target.write_bytes(data)
                 if rel.endswith(".sh"):
                     target.chmod(0o755)
         if kind == "recipe":

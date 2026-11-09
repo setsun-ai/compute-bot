@@ -1,0 +1,3 @@
+#!/bin/sh
+# The compute-bot queue from any shell: compute jobs, compute submit FOLDER, compute log N -f ...
+COMPUTE_HOME=${COMPUTE_HOME:-/var/lib/compute-bot} PYTHONPATH=/opt/compute-bot/app exec python3 -m compute_bot.cli "$@"
