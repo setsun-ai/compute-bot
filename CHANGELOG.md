@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.3 (2026-11)
+
+- **Instalator działa z katalogu domowego.** Uruchomiony z `~/Documents/...` padał na
+  `critical libmamba … cannot set current path: Permission denied`: micromamba jako użytkownik `compute` nie mogła
+  wejść do zamkniętego katalogu, z którego wystartował instalator. Teraz instalator zaczyna od `/`.
+- **Ponowne uruchomienie po nieudanej próbie** usuwa niedokończone środowisko (katalog bez `conda-meta`), zamiast
+  utknąć na nim.
+
 ## 0.1.2 (2026-11)
 
 - **Starsze paczki CHARMM-GUI z OpenMM 8:** minimalizacja w skryptach sprzed OpenMM 8 podawała tolerancję w
