@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.2 (2026-11)
+
+- **Starsze paczki CHARMM-GUI z OpenMM 8:** minimalizacja w skryptach sprzed OpenMM 8 podawała tolerancję w
+  kJ/mol zamiast kJ/mol/nm i kończyła się błędem jednostek; kopia skryptu poprawia jednostkę (ta sama wartość).
+- Wydanie powstaje dopiero, gdy przejdą też testy przepisów (0.1.1 wyszło z jednym czerwonym testem).
+
 ## 0.1.1 (2026-11)
 
 - **CHARMM-GUI + OpenMM na CPU:** skrypt `openmm_run.py` z paczek CHARMM-GUI 3.5 wpuszczał tylko platformy GPU

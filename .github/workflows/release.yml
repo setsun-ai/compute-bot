@@ -1,5 +1,5 @@
 # Pushing a version tag (git tag v1.2.3 && git push origin v1.2.3) publishes a GitHub release: the tag must match
-# VERSION in compute_bot/__init__.py, lint + core tests must pass, and the notes are the "## 1.2.3" section of
+# VERSION in compute_bot/__init__.py, lint, core and recipe tests must pass, and the notes are the "## 1.2.3" section of
 # CHANGELOG.md. The bot's /update installs the latest release.
 name: Release
 
@@ -11,7 +11,26 @@ permissions:
   contents: write
 
 jobs:
+  recipes:
+    # 0.1.1 shipped with a failing recipe test because only the core ran here: a release needs both.
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash -el {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: deploy/environment.yml
+          cache-environment: true
+      - run: python -m pip install pytest
+      - run: python -m pytest -q tests/recipes
+
   release:
+    needs: recipes
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:

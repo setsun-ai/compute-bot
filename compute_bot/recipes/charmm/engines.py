@@ -297,6 +297,8 @@ def openmm_script(edir: Path, script: str) -> tuple[str, list[str]]:
     patched = re.sub(r"prop\s*=\s*dict\(\s*Cuda\w*\s*=[^)]*\)", "prop = dict()", patched)
     # CHARMM-GUI 3.5 takes --platform but lets through only the GPU names it lists here
     patched = _ALLOWED.sub(_allow_cpu, patched)
+    # OpenMM 8: the minimiser tolerance is a force; older scripts give it in energy units (same number)
+    patched = re.sub(r"(tolerance\s*=\s*[^,)]*?\*\s*kilojoule)\s*/\s*mole\b(?!\s*/)", r"\1/(mole*nanometer)", patched)
     extra = ["--platform", "CPU"] if "--platform" in src else []
     if patched == src:
         return script, extra

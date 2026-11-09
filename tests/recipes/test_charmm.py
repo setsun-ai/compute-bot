@@ -1209,3 +1209,12 @@ def test_cpu_joins_any_spelling_of_the_platform_list(tmp_path, line, expected):
     (tmp_path / "run.py").write_text(line + "\n")
     name, _ = E.openmm_script(tmp_path, "run.py")
     assert (tmp_path / name).read_text() == expected + "\n"
+
+
+def test_old_minimizer_tolerance_gets_openmm8_units(tmp_path):
+    # OpenMM 8 wants a force (kJ/mol/nm); CHARMM-GUI scripts from before it pass kJ/mol. Same number: OpenMM 7
+    # already read it as a force. Found by CI on the real 2021 package.
+    (tmp_path / "run.py").write_text(
+        "simulation.minimizeEnergy(tolerance=inputs.mini_Tol*kilojoule/mole, maxIterations=inputs.mini_nstep)\n")
+    name, _ = E.openmm_script(tmp_path, "run.py")
+    assert "tolerance=inputs.mini_Tol*kilojoule/(mole*nanometer)," in (tmp_path / name).read_text()
