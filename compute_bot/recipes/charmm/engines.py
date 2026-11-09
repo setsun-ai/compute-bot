@@ -274,7 +274,17 @@ def run_gromacs(s: K.Step, edir: Path, env: dict, eta: Eta):
 
 # --- OpenMM ---------------------------------------------------------------------------------------------------------
 
+_ALLOWED = re.compile(r"""^DEFAULT_PLATFORMS\s*=\s*[^\n]*$""", re.M)
 _PLATFORM = re.compile(r"""Platform\.getPlatformByName\(\s*['"](?:CUDA|OpenCL|HIP|Metal)['"]\s*\)""")
+
+
+def _allow_cpu(match):
+    line = match[0].rstrip()
+    if "CPU" in line:
+        return line
+    if line[-1] in ")]":  # ('CUDA', 'OpenCL') or ['CUDA', 'OpenCL']
+        return line[:-1].rstrip().rstrip(",") + ", 'CPU'" + line[-1]
+    return line + ", 'CPU'"
 
 
 def openmm_script(edir: Path, script: str) -> tuple[str, list[str]]:
@@ -283,17 +293,18 @@ def openmm_script(edir: Path, script: str) -> tuple[str, list[str]]:
     src = _text(edir / script)
     if not src:
         raise RecipeError(f"brak {script} w folderze openmm/ paczki")
-    if "--platform" in src:
-        return script, ["--platform", "CPU"]
     patched = _PLATFORM.sub("Platform.getPlatformByName('CPU')", src)
     patched = re.sub(r"prop\s*=\s*dict\(\s*Cuda\w*\s*=[^)]*\)", "prop = dict()", patched)
+    # CHARMM-GUI 3.5 takes --platform but lets through only the GPU names it lists here
+    patched = _ALLOWED.sub(_allow_cpu, patched)
+    extra = ["--platform", "CPU"] if "--platform" in src else []
     if patched == src:
-        return script, []
+        return script, extra
     name = "bot_" + Path(script).name
     path = edir / name
     if _text(path) != patched:
         path.write_text(patched)
-    return name, []
+    return name, extra
 
 
 def run_openmm(s: K.Step, edir: Path, env: dict, eta: Eta, python: str = sys.executable):

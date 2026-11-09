@@ -1183,3 +1183,29 @@ def test_real_openmm_package_short_run(tmp_path):
     assert "→ OpenMM" in summary and "CHARMM36m" in summary
     assert (o / "step5_1.rst").exists() and (work / "wyniki" / "rmsd.csv").exists()
     print(summary)
+
+
+def test_openmm_script_that_only_allows_gpu_platforms_gets_cpu_added(tmp_path):
+    # CHARMM-GUI 3.5 (e.g. paper_higashida2021 7eh3): --platform exists but accepts only CUDA/OpenCL, and without
+    # it the script never picks CPU. Found by CI on the real package.
+    (tmp_path / "openmm_run.py").write_text(
+        "parser.add_argument('--platform', nargs=1)\n"
+        "DEFAULT_PLATFORMS = 'CUDA', 'OpenCL'\n"
+        "if args.platform:\n"
+        "    if not args.platform[0] in DEFAULT_PLATFORMS:\n"
+        "        sys.exit(1)\n")
+    name, extra = E.openmm_script(tmp_path, "openmm_run.py")
+    assert name == "bot_openmm_run.py" and extra == ["--platform", "CPU"]
+    assert "DEFAULT_PLATFORMS = 'CUDA', 'OpenCL', 'CPU'" in (tmp_path / name).read_text()
+    assert "DEFAULT_PLATFORMS = 'CUDA', 'OpenCL'\n" in (tmp_path / "openmm_run.py").read_text()  # original untouched
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("DEFAULT_PLATFORMS = ('CUDA', 'OpenCL')", "DEFAULT_PLATFORMS = ('CUDA', 'OpenCL', 'CPU')"),
+    ("DEFAULT_PLATFORMS = ['CUDA', 'OpenCL',]", "DEFAULT_PLATFORMS = ['CUDA', 'OpenCL', 'CPU']"),
+    ("DEFAULT_PLATFORMS = 'CUDA', 'CPU'", "DEFAULT_PLATFORMS = 'CUDA', 'CPU'"),
+])
+def test_cpu_joins_any_spelling_of_the_platform_list(tmp_path, line, expected):
+    (tmp_path / "run.py").write_text(line + "\n")
+    name, _ = E.openmm_script(tmp_path, "run.py")
+    assert (tmp_path / name).read_text() == expected + "\n"

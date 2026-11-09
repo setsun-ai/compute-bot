@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 (2026-11)
+
+- **CHARMM-GUI + OpenMM na CPU:** skrypt `openmm_run.py` z paczek CHARMM-GUI 3.5 wpuszczał tylko platformy GPU
+  (CUDA, OpenCL) i kończył się od razu na laptopie bez karty graficznej. Kopia skryptu dopisuje teraz CPU do listy.
+- Pierwsze wydanie z kompletem testów w CI (0.1.0 zostało tylko tagiem).
+
 ## 0.1.0 (2026-11)
 
 - **Kolejka obliczeń na Telegramie.** Plik albo komenda → zadanie w kolejce; jedno naraz, z najniższym
