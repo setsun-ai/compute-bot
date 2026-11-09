@@ -122,6 +122,8 @@ RECIPES = {r.name: r for r in (
             "model": Param("int", 1, "który model z pliku NMR", low=1, high=1000),
             "chains": Param("str", "", "łańcuchy do zostawienia, np. A,B (puste = wszystkie)"),
             "seed": Param("int", -1, "ziarno prędkości (-1 = losowe)"),
+            "ensemble": Param("choice", "npt", "produkcja w NPT czy NVT (NVT lepsze do rozwijania w wysokiej T)",
+                              ("npt", "nvt")),
         },
         inputs=(".pdb", ".cif"), needs_file=False),
     Recipe(
