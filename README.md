@@ -12,6 +12,8 @@ ostygnięcia. Po restarcie laptopa przerwane zadanie startuje znowu, a GROMACS w
 | macierz DIA-NN / MS-DIAL + `omics` | QC, blanki, braki, normalizacja, dryf i partie, PCA, PLS-DA, testy z FDR, UniProt, g:Profiler | [docs/omics.md](docs/omics.md) |
 | zip receptor + ligandy + `dock` | AutoDock Vina, redocking kontrolny, ranking, kontakty | [docs/dock.md](docs/dock.md) |
 | zip z `run.sh`, `.tpr`, `.py`, `.ipynb` | dowolne obliczenie w środowisku conda | [docs/skrypty.md](docs/skrypty.md) |
+| `charmm-gui.tgz` | protokół CHARMM-GUI dla GROMACS / OpenMM / NAMD | [docs/charmm.md](docs/charmm.md) |
+| SSH przez Tailscale | `compute submit`, `compute jobs`, VS Code, Jupyter | [docs/zdalnie.md](docs/zdalnie.md) |
 
 Pliki większe niż 20 MB (limit Telegrama): `/url LINK omics …` – Google Drive, Dropbox albo zwykły link; plik
 pobiera się w samym zadaniu i wznawia po przerwie.
