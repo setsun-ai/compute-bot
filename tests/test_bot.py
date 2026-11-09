@@ -468,3 +468,56 @@ def test_a_card_started_from_the_panel_leaves_the_chat_too(env, tmp_path):
     (tmp_path / "staging" / token / ".started").touch()
     bot.tick()
     assert bot.state["drafts"] == {} and not (tmp_path / "staging" / token).exists()
+
+
+# --- the panel (Mini App) -----------------------------------------------------------------------------
+
+class FakeExposure:
+    def __init__(self, public=False):
+        self.public, self.calls = public, []
+
+    def status(self):
+        return self.public
+
+    def set_public(self, on):
+        self.calls.append(on)
+        self.public = on
+
+
+@pytest.fixture
+def panel(tmp_path):
+    api, clock = FakeApi(), Clock()
+    store = jobs.Store(tmp_path)
+    exposure = FakeExposure()
+    bot = Bot(store, api, OWNER, tmp_path / "bot.json", clock=clock, system_info=lambda: "",
+              web_url="https://vostro.example.ts.net/", exposure=exposure)
+    return bot, api, store, exposure
+
+
+def test_panel_button_opens_the_mini_app(panel):
+    bot, api, _, _ = panel
+    bot.handle_update(message("/panel"))
+    (button,) = last_buttons(api)
+    assert button["web_app"]["url"] == "https://vostro.example.ts.net/"
+
+
+def test_cards_offer_the_panel_too(panel):
+    bot, api, _, _ = panel
+    bot.handle_update(message("/md 1E0L"))
+    assert any(b.get("web_app") for b in last_buttons(api))
+
+
+def test_without_tailscale_the_panel_explains_how(env):
+    bot, api, _, _ = env
+    bot.handle_update(message("/panel"))
+    assert "remote.sh" in api.last_text()
+
+
+def test_funnel_on_and_off(panel):
+    bot, api, _, exposure = panel
+    bot.handle_update(message("/funnel on"))
+    assert exposure.calls == [True] and "publiczn" in api.last_text()
+    bot.handle_update(message("/funnel"))
+    assert "włączony" in api.last_text()
+    bot.handle_update(message("/funnel off"))
+    assert exposure.calls == [True, False]

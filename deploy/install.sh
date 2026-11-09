@@ -88,10 +88,11 @@ fi
 
 install -m 755 "$OPT/app/deploy/compute" /usr/local/bin/compute
 install -m 644 "$OPT/app/deploy/profile.sh" /etc/profile.d/compute-bot.sh
-install -m 644 "$OPT/app/deploy/compute-bot.service" "$OPT/app/deploy/compute-runner.service" /etc/systemd/system/
+install -m 644 "$OPT/app/deploy/compute-bot.service" "$OPT/app/deploy/compute-runner.service" \
+  "$OPT/app/deploy/compute-web.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable -q compute-bot compute-runner
-systemctl restart compute-bot compute-runner
+systemctl enable -q compute-bot compute-runner compute-web
+systemctl restart compute-bot compute-runner compute-web
 sleep 3
 if systemctl is-active --quiet compute-bot && systemctl is-active --quiet compute-runner; then
   echo "Gotowe. Wersja $(cd "$OPT/app" && python3 -m compute_bot --version), wątków: $(cut -d= -f2 "$RUNNER_ENV")."

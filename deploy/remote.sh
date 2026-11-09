@@ -13,11 +13,21 @@ fi
 echo
 echo "Logowanie do Tailscale: otwórz link poniżej (na telefonie albo Macu) i zaloguj się swoim kontem."
 tailscale up --ssh
+# The panel: private HTTPS on the tailnet name; the bot may switch it to public (Funnel) as user compute.
+tailscale set --operator=compute
+tailscale serve --bg --https=443 http://127.0.0.1:8787
 name=$(tailscale status --self --json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' || hostname)
 user=${SUDO_USER:-$USER}
+if grep -q '^WEB_URL=' /etc/compute-bot.env; then
+  sed -i "s|^WEB_URL=.*|WEB_URL=https://$name/|" /etc/compute-bot.env
+else
+  echo "WEB_URL=https://$name/" >> /etc/compute-bot.env
+fi
+systemctl restart compute-bot compute-web
 cat <<INFO
 
-Gotowe. Z Maca (z zainstalowanym Tailscale, tym samym kontem):
+Gotowe. Panel: przycisk „Panel” w czacie z botem (na telefonie włącz Tailscale; bez niego: /funnel on).
+Z Maca (z zainstalowanym Tailscale, tym samym kontem):
   ssh $user@$name                 # terminal; długie rzeczy w tmux
   compute jobs                    # ta sama kolejka co w bocie; compute submit FOLDER
   compute-env                     # gmx, python, vina... w swojej powłoce

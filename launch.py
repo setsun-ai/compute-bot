@@ -9,8 +9,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from compute_bot.updater import chosen_app  # noqa: E402
 
-if len(sys.argv) < 2 or sys.argv[1] not in ("bot", "runner"):
-    sys.exit("użycie: launch.py bot|runner")
+if len(sys.argv) < 2 or sys.argv[1] not in ("bot", "runner", "web"):
+    sys.exit("użycie: launch.py bot|runner|web")
 app = chosen_app(HERE, Path(os.environ.get("COMPUTE_HOME", ".")) / "update")
 os.environ["PYTHONPATH"] = str(app)
 os.environ["COMPUTE_INSTALLED"] = str(HERE)

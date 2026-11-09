@@ -20,6 +20,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 from . import VERSION, actions, drafts, jobs
+from .drafts import keyboard
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
 
@@ -40,16 +41,13 @@ HELP = (
     "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
     "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
     "/co 3 – raport postępu co 3 h · /cisza 23-7 – nocą bez dźwięku · /system\n"
+    "/panel – kolejka, wykresy i parametry w aplikacji · /funnel on|off – panel bez Tailscale\n"
     "/env – doinstaluj pakiety · /update · /rollback"
 )
 
 
 def esc(text):
     return html.escape(str(text), quote=False)
-
-
-def keyboard(rows):
-    return json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in rows if row]})
 
 
 def duration(seconds):
@@ -95,7 +93,9 @@ def system_info(home="."):
 
 
 class Bot:
-    def __init__(self, store, api, owner, state_path, updater=None, clock=time.time, system_info=system_info):
+    def __init__(self, store, api, owner, state_path, updater=None, clock=time.time, system_info=system_info,
+                 web_url=None, exposure=None):
+        self.web_url, self.exposure = web_url, exposure
         self.store, self.api, self.owner = store, api, owner
         self.state_path, self.updater, self.clock = Path(state_path), updater, clock
         self.system_info = system_info
@@ -228,7 +228,7 @@ class Bot:
         self.state["drafts"][token] = draft
         self.state["open_draft"] = token
         self.save()
-        self.say(*drafts.card(token, draft))
+        self.say(*drafts.card(token, draft, self.web_url))
 
     def show(self, message_id, text, markup):
         try:
@@ -257,7 +257,7 @@ class Bot:
             self.state["drafts"][token] = draft
             self.state["open_draft"] = token
             self.save()
-        self.show(message_id, *drafts.card(token, draft))
+        self.show(message_id, *drafts.card(token, draft, self.web_url))
 
     def edit_open_draft(self, text):
         token = self.state.get("open_draft")
@@ -267,7 +267,7 @@ class Bot:
         draft = drafts.edit_text(draft, text)
         self.state["drafts"][token] = draft
         self.save()
-        self.say(*drafts.card(token, draft))
+        self.say(*drafts.card(token, draft, self.web_url))
 
     def queue(self, kind, entry, name, params, files, fetch=()):
         if kind == "recipe":
@@ -325,7 +325,7 @@ class Bot:
                    "pomoc": self.help_command, "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
-                   "dolicz": self.extend_command,
+                   "dolicz": self.extend_command, "panel": self.panel_command, "funnel": self.funnel_command,
                    "update": self.update_command, "rollback": self.rollback_command}
         if word in general:
             return general[word](rest)
@@ -402,6 +402,29 @@ class Bot:
         if kind == "recipe":
             return self.open_draft(entry, name, params, fetch=fetch)
         self.queue(kind, entry, name, params, {}, fetch=fetch)
+
+    def panel_command(self, _rest=""):
+        if not self.web_url:
+            return self.say("Panel działa przez Tailscale: na laptopie <code>sudo bash deploy/remote.sh</code>, "
+                            "potem tu wróć. Do tego czasu wszystko jest dostępne w czacie.")
+        self.say("🧾 Panel: kolejka na żywo, wykresy, logi, parametry. Na telefonie musi działać Tailscale "
+                 "(albo /funnel on).", keyboard([[("🧾 Otwórz panel", self.web_url)]]))
+
+    def funnel_command(self, rest):
+        if not self.web_url or self.exposure is None:
+            return self.panel_command()
+        from .exposure import ExposureError
+        try:
+            if rest in ("on", "off"):
+                self.exposure.set_public(rest == "on")
+            public = self.exposure.status()
+        except ExposureError as e:
+            return self.say(f"❌ {esc(e)}")
+        if public:
+            self.say("🌍 Panel publiczny (Funnel włączony): otworzysz go bez Tailscale. Wchodzi tylko podpisany "
+                     "Telegram z Twoim kontem; obcy dostaje „brak dostępu”. /funnel off – z powrotem prywatnie.")
+        else:
+            self.say("🔒 Panel prywatny: tylko urządzenia w Twoim Tailscale. /funnel on – publicznie.")
 
     def extend_command(self, rest):
         """/dolicz N NS: a finished md run goes on for NS more nanoseconds, sharing its files (hard links)."""
@@ -673,6 +696,7 @@ def run(api, bot):
         api("setMyCommands", {"commands": json.dumps([
             {"command": "jobs", "description": "Kolejka zadań"},
             {"command": "system", "description": "Temperatura, RAM, dysk"},
+            {"command": "panel", "description": "Panel (Mini App)"},
             {"command": "help", "description": "Co umiem"}])})
     except TelegramError as e:
         log(f"start: {e}")
@@ -723,8 +747,17 @@ def main(argv):
     from .updater import Updater
     home = Path(os.environ.get("COMPUTE_HOME", "."))
     store = jobs.Store(home)
+    from .exposure import Exposure
+    web_url = os.environ.get("WEB_URL") or None  # written by deploy/remote.sh once Tailscale serves the panel
     bot = Bot(store, api, int(owner), home / "bot.json", updater=Updater(home / "update"),
-              system_info=lambda: system_info(home))
+              system_info=lambda: system_info(home), web_url=web_url,
+              exposure=Exposure(int(os.environ.get("WEB_PORT", "8787"))))
+    if web_url:
+        try:  # the "Panel" button next to the message field, like BotFather's Open
+            api("setChatMenuButton", {"chat_id": owner, "menu_button": json.dumps(
+                {"type": "web_app", "text": "Panel", "web_app": {"url": web_url}})})
+        except TelegramError as e:
+            log(f"menu button: {e}")
     try:
         run(api, bot)
     except KeyboardInterrupt:

@@ -16,8 +16,15 @@ from .recipes import QUICK, RECIPES, quick_values
 PER_ROW = 3
 
 
-def _keyboard(rows):
-    return json.dumps({"inline_keyboard": [[{"text": t, "callback_data": d} for t, d in row] for row in rows if row]})
+def button(text, data):
+    """A tap goes back to the bot; an https address opens the Mini App instead."""
+    if data.startswith("https://"):
+        return {"text": text, "web_app": {"url": data}}
+    return {"text": text, "callback_data": data}
+
+
+def keyboard(rows):
+    return json.dumps({"inline_keyboard": [[button(t, d) for t, d in row] for row in rows if row]})
 
 
 def new(recipe, name, typed, fetch=()):
@@ -40,7 +47,7 @@ def shown(value):
     return str(value) if value not in (None, "") else "—"
 
 
-def card(token, draft):
+def card(token, draft, web_url=None):
     recipe = RECIPES[draft["recipe"]]
     current = values(draft)
     quick = QUICK.get(draft["recipe"], {})
@@ -55,7 +62,9 @@ def card(token, draft):
     buttons = [(f"{key}: {shown(current[key])}", f"p:{token}:{key}") for key in QUICK.get(draft["recipe"], {})]
     rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
     rows.append([("▶️ Start", f"s:{token}"), ("✖️ Anuluj", f"c:{token}")])
-    return "\n".join(lines), _keyboard(rows)
+    if web_url:
+        rows.append([("🧾 Wszystkie parametry w panelu", web_url)])
+    return "\n".join(lines), keyboard(rows)
 
 
 def _example(recipe):
@@ -69,7 +78,7 @@ def choices(token, draft, key):
     buttons = [(("• " if v == current else "") + v, f"v:{token}:{key}:{i}") for i, v in enumerate(options)]
     rows = [buttons[i:i + PER_ROW] for i in range(0, len(buttons), PER_ROW)] + [[("↩️ Wróć", f"b:{token}")]]
     help_text = RECIPES[draft["recipe"]].params[key].help
-    return f"<code>{key}</code>: {html.escape(help_text)}\nInna wartość: napisz <code>{key}=…</code>", _keyboard(rows)
+    return f"<code>{key}</code>: {html.escape(help_text)}\nInna wartość: napisz <code>{key}=…</code>", keyboard(rows)
 
 
 def choose(draft, key, index):

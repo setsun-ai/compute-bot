@@ -1,0 +1,25 @@
+[Unit]
+Description=compute-bot: panel (Mini App) na 127.0.0.1, przez tailscale serve/funnel
+After=network-online.target
+
+[Service]
+User=compute
+Group=compute
+# The token is needed to check Telegram's signature on every request.
+EnvironmentFile=/etc/compute-bot.env
+Environment=COMPUTE_HOME=/var/lib/compute-bot
+ExecStart=/usr/bin/python3 /opt/compute-bot/app/launch.py web
+Restart=always
+RestartSec=10
+UMask=0007
+Nice=5
+MemoryMax=200M
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/compute-bot
+
+[Install]
+WantedBy=multi-user.target
