@@ -234,7 +234,8 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 const app = $('#app');
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const now = () => Date.now() / 1000;
+let skew = 0;  // zegar laptopa minus zegar telefonu [s], z /api/state now
+const now = () => Date.now() / 1000 + skew;
 const pl = n => String(n).replace('.', ',');
 function plural(n, one, few, many) {
   const t = n % 100, u = n % 10;
@@ -260,7 +261,7 @@ function rel(ts) {
 }
 function clock(ts) {
   if (!ts) return '—';
-  const d = new Date(ts * 1000), t = new Date(), p = x => String(x).padStart(2, '0');
+  const d = new Date(ts * 1000), t = new Date(now() * 1000), p = x => String(x).padStart(2, '0');
   const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
   if (d.toDateString() === t.toDateString()) return `dziś ${hm}`;
   if (d.toDateString() === new Date(t - 864e5).toDateString()) return `wczoraj ${hm}`;
@@ -380,6 +381,7 @@ async function pollState() {
   try {
     const [s, d] = await Promise.all([api('GET', '/api/state'), api('GET', '/api/drafts')]);
     lastState = s; lastDrafts = d || {}; failures = 0; lastPoll = Date.now();
+    if (s.now) skew = s.now - Date.now() / 1000;
     sample(s.system);
     if (!recipesCache) await recipes().catch(() => { recipesCache = null; });
   } catch (e) {
@@ -412,7 +414,8 @@ function refresh() {
 const ST = { queued: ['⏳', 'W kolejce'], running: ['⚙️', 'Liczy się'], paused: ['⏸️', 'Wstrzymane'],
   done: ['✅', 'Gotowe'], failed: ['❌', 'Błąd'], cancelled: ['⏹️', 'Przerwane'] };
 const ACTIVE = ['queued', 'running', 'paused'];
-const MAX_ATTEMPTS = 3;  // jobs.MAX_ATTEMPTS (API go nie podaje)
+const maxAttempts = () => (lastState && lastState.max_attempts) || 3;
+const queuePos = id => lastState && lastState.queue ? lastState.queue.indexOf(id) + 1 : 0;  // 1 = następne do startu
 const stIcon = j => j.state === 'paused' ? (j.pause === 'heat' ? '🌡️' : '⏸️') : (ST[j.state] || ['❔'])[0];
 function stLabel(j) {
   if (j.state === 'paused') return j.pause === 'heat' ? 'Wstrzymane – procesor za gorący' : 'Wstrzymane – pauza kolejki';
@@ -436,17 +439,28 @@ function parseEta(p) {
   else if ((m = p.match(/koniec ok\. (.+)$/))) o.stageAt = m[1];
   return o;
 }
+/* "10.11 03:25" (czas laptopa) → sekundy od teraz według zegara laptopa; null, gdy nie da się odczytać albo już minęło. */
+function untilAt(at) {
+  const m = /^(\d\d)\.(\d\d) (\d\d?):(\d\d)$/.exec(at || '');
+  if (!m) return null;
+  const t = new Date(now() * 1000);
+  let d = new Date(t.getFullYear(), +m[2] - 1, +m[1], +m[3], +m[4]);
+  if (d - t < -180 * 864e5) d = new Date(t.getFullYear() + 1, +m[2] - 1, +m[1], +m[3], +m[4]);  // przełom roku
+  const left = (d - t) / 1000;
+  return left > 0 ? left : null;
+}
 function etaHtml(e) {
   const bits = [];
   if (e.stageLeft || e.stageAt) bits.push(e.stageLeft ? `etap: ~${esc(e.stageLeft)}${e.stageAt ? ` (ok. ${esc(e.stageAt)})` : ''}` : `etap do ok. ${esc(e.stageAt)}`);
-  if (e.total) bits.push(`<b>całość: ~${esc(e.total)}</b>${e.totalAt ? ` (ok. ${esc(e.totalAt)})` : ''}`);
+  const left = untilAt(e.totalAt);
+  if (e.total) bits.push(`<b>całość: ~${esc(left != null ? dur(left) : e.total)}</b>${e.totalAt ? ` (ok. ${esc(e.totalAt)})` : ''}`);
   return (e.pct != null ? `<div class="pbar"><i style="width:${e.pct}%"></i></div>` : '') +
     (bits.length ? `<div class="eta">⏱ ${bits.join(' · ')}</div>` : '');
 }
 function timing(j) {
   if (j.state === 'running' && j.started) return `⚙️ ${dur(now() - j.started)}`;
   if (j.state === 'paused' && j.started) return `od startu ${dur(now() - j.started)}`;
-  if (j.state === 'queued') return `czeka od ${dur(now() - j.created)}`;
+  if (j.state === 'queued') return `${queuePos(j.id) ? queuePos(j.id) + '. w kolejce · ' : ''}czeka od ${dur(now() - j.created)}`;
   if (j.finished) return `${rel(j.finished)}${j.started ? ' · trwało ' + dur(j.finished - j.started) : ''}`;
   return rel(j.created);
 }
@@ -484,7 +498,7 @@ function healthHtml(s) {
   let icon, head, note;
   if (!r.alive) [icon, head, note] = ['🔴', 'Runner nie odpowiada', 'brak pulsu od ponad 3 min – laptop uśpiony albo usługa stoi'];
   else if (s.hold || r.blocked === 'hold') [icon, head, note] = ['⏸️', 'pauza', 'kolejka wstrzymana – nowe zadania nie startują'];
-  else if (r.blocked === 'disk') [icon, head, note] = ['💾', 'mało miejsca', `wolne ${size(r.free)} – usuń stare zadania (/usun stare)`];
+  else if (r.blocked === 'disk') [icon, head, note] = ['💾', 'mało miejsca', `wolne ${size(r.free)} – zwolnij miejsce poniżej`];
   else if (r.job) [icon, head, note] = ['🟢', `liczy #${r.job}`, r.threads ? `${r.threads} ${plural(r.threads, 'wątek', 'wątki', 'wątków')}` : ''];
   else [icon, head, note] = ['🟢', 'gotowy', 'nic nie czeka'];
   const temp = sys.temp, tcls = temp >= 92 ? 'hot' : temp >= 80 ? 'warn' : '';
@@ -493,7 +507,7 @@ function healthHtml(s) {
   const load = sys.load ? sys.load[0] : null;
   return `<div class="sec">
     <div class="health"><span class="big">${icon}</span><div class="grow"><div class="title">${esc(head)}</div>
-      <div class="meta">${esc(note)}</div></div>
+      <div class="meta">${esc(note)}</div>${r.time ? `<div class="meta">puls ${esc(dur(Math.max(0, now() - r.time)))} temu</div>` : ''}</div>
       <button class="btn sm ${s.hold ? '' : 'ghost'}" data-act="hold">${s.hold ? '▶️ Wznów' : '⏸️ Pauza'}</button></div>
     <div class="gauges">
       ${gauge('CPU', temp != null ? `${Math.round(temp)} °C` : '—', temp != null ? (temp - 30) / 70 * 100 : 0, tcls,
@@ -503,6 +517,8 @@ function healthHtml(s) {
       ${gauge('Dysk', diskUsed != null ? `${Math.round(diskUsed)}%` : '—', diskUsed, diskUsed > 95 ? 'hot' : diskUsed > 85 ? 'warn' : '',
         sys.disk_free != null ? `wolne ${size(sys.disk_free)}` : '')}
     </div>
+    <div class="btns" style="padding:8px 12px 0;justify-content:flex-end">
+      <button class="btn sm ${r.blocked === 'disk' || diskUsed > 85 ? '' : 'ghost'}" data-act="cleanup">🧹 Zwolnij miejsce</button></div>
     <div class="pad">${spark()}</div></div>`;
 }
 function jobRow(j) {
@@ -518,6 +534,7 @@ function draftRow([t, d]) {
   const n = Object.keys(d.params || {}).length;
   return `<div class="row tap" data-act="draft" data-token="${esc(t)}"><span class="ico">📝</span><div class="grow">
     <div class="title">${esc(d.name)}</div><div class="meta">${esc(recipeName(d.recipe))}${n ? ` · ${n} ${plural(n, 'zmiana', 'zmiany', 'zmian')}` : ''}${d.fetch && d.fetch.length ? ' · z linku' : ''}</div></div>
+    <button class="btn sm ghost" data-act="discard" data-token="${esc(t)}" aria-label="Odrzuć kartę">✖️</button>
     <span class="badge on">▶️ Start</span></div>`;
 }
 function renderHome() {
@@ -587,10 +604,10 @@ function jobHeadHtml(d) {
   if (d.started) rows.push(['Start', clock(d.started)]);
   if (d.finished) rows.push(['Koniec', clock(d.finished)]);
   if (d.started) rows.push([d.finished ? 'Trwało' : 'Liczy się od', dur((d.finished || now()) - d.started)]);
-  if (d.attempt) rows.push(['Próba', `${d.attempt} z ${MAX_ATTEMPTS}`]);
+  if (d.attempt) rows.push(['Próba', `${d.attempt} z ${maxAttempts()}`]);
   if (d.state === 'queued' && lastState) {
-    const ahead = lastState.jobs.filter(j => j.state === 'queued' && j.id < d.id).length;
-    rows.push(['Kolejka', ahead ? `${ahead} ${plural(ahead, 'zadanie', 'zadania', 'zadań')} przed nim (chyba że ma wyższy priorytet)` : 'następne do startu']);
+    const pos = queuePos(d.id), ahead = pos - 1;
+    if (pos) rows.push(['Kolejka', `${pos}. – ${ahead ? `${ahead} ${plural(ahead, 'zadanie', 'zadania', 'zadań')} przed nim` : 'następne do startu'}`]);
   }
   return `<div class="row"><span class="ico">${stIcon(d)}</span><div class="grow"><div class="title">${esc(stLabel(d))}</div>
       ${d.progress ? `<div class="meta" style="white-space:normal">${esc(e ? e.head : d.progress)}</div>` : ''}${e ? etaHtml(e) : ''}
@@ -605,6 +622,7 @@ function actionsHtml(d) {
   if (!ACTIVE.includes(d.state)) {
     if (d.kind === 'recipe') b.push('<button class="btn ghost" data-act="retryForm">✏️ Ponów ze zmianami</button>');
     b.push('<button class="btn ghost" data-act="retrySame">🔁 Ponów bez zmian</button>');
+    b.push('<button class="btn danger" data-act="remove">🗑️ Usuń</button>');
   }
   let ext = '';
   if (d.kind === 'recipe' && d.entry === 'md' && d.state === 'done') {
@@ -707,6 +725,42 @@ async function stopJob() {
   if (!await confirmBox(`Zatrzymać #${d.id} ${d.name}? Zadanie skończy się jako przerwane; pliki, które już powstały, zostają.`)) return;
   try { await api('POST', `/api/jobs/${d.id}/cancel`, {}); haptic('success'); toast('⏹️ Zatrzymuję – runner przerwie zadanie w ciągu kilkunastu sekund'); loadJob(true); }
   catch (e) { haptic('error'); toast(e.message, true); }
+}
+async function removeJob() {
+  const d = J.data, total = d.files.reduce((a, f) => a + f.size, 0);
+  if (!await confirmBox(`Usunąć #${d.id} ${d.name} razem z ${d.files.length} ${plural(d.files.length, 'plikiem', 'plikami', 'plikami')} (${size(total)})? Tego nie da się cofnąć.`)) return;
+  try {
+    await api('POST', `/api/jobs/${d.id}/remove`, {});
+    haptic('success'); toast(`🗑️ Usunięto #${d.id} (${size(total)})`);
+    go('home', {}, { reset: true }); pollState();
+  } catch (e) { haptic('error'); toast(e.message, true); }
+}
+async function cleanup() {
+  const DAYS = 7, s = lastState;
+  const old = s.jobs.filter(j => !ACTIVE.includes(j.state) && j.finished && now() - j.finished > DAYS * 86400);
+  const msg = old.length
+    ? `Usunąć ${old.length} ${plural(old.length, 'skończone zadanie', 'skończone zadania', 'skończonych zadań')} starsze niż ${DAYS} dni (${old.map(j => '#' + j.id).join(', ')}) razem z plikami? Tego nie da się cofnąć.`
+    : `Na liście nie ma skończonych zadań starszych niż ${DAYS} dni (pokazuję ostatnie 50). Sprawdzić i usunąć starsze, jeśli są?`;
+  if (!await confirmBox(msg)) return;
+  try {
+    const r = await api('POST', '/api/cleanup', { days: DAYS });
+    const ids = (r.removed || []).map(x => '#' + x).join(', ');
+    haptic('success');
+    const text = r.removed && r.removed.length ? `🗑️ Usunięto ${r.removed.length}: ${ids}` : 'Nie było czego usuwać.';
+    if (ver('6.2') && tg.showAlert) tg.showAlert(text); else toast(text);
+    pollState();
+  } catch (e) { haptic('error'); toast(e.message, true); }
+}
+async function discardDraft(token) {
+  const d = lastDrafts[token];
+  if (!await confirmBox(`Odrzucić kartę ${d ? d.name : ''}? Wysłany plik nie zostanie uruchomiony.`)) return;
+  try {
+    await api('POST', `/api/drafts/${token}/discard`, {});
+    haptic('success'); toast('✖️ Karta odrzucona');
+    delete lastDrafts[token]; closingGuard(false);
+    if (cur().name === 'home') renderHome(); else go('home', {}, { reset: true });
+    pollState();
+  } catch (e) { haptic('error'); toast(e.message, true); if (e.status === 409) { go('home', {}, { reset: true }); pollState(); } }
 }
 async function doTop() {
   try { await api('POST', `/api/jobs/${J.id}/top`, {}); haptic('success'); toast('⬆️ Na początku kolejki'); loadJob(true); }
@@ -916,7 +970,8 @@ function renderForm(p) {
       const open = keys.some(k => F.vals[k] !== F.defaults[k] || F.vals[k] !== F.base[k] || k === F.serverParam);
       return `<details class="sec" ${open ? 'open' : ''}><summary>${esc(t)}</summary>${inner}</details>`;
     }).join('')}
-    <div class="hint small" style="margin:6px 4px 0">Wysyłane są tylko zmienione wartości; resztę bot bierze ${p.mode === 'draft' ? 'z karty' : 'z poprzedniego zadania'}.</div>`;
+    <div class="hint small" style="margin:6px 4px 0">Wysyłane są tylko zmienione wartości; resztę bot bierze ${p.mode === 'draft' ? 'z karty' : 'z poprzedniego zadania'}.</div>
+    ${p.mode === 'draft' ? `<div class="btns" style="justify-content:center"><button class="btn danger" data-act="discard" data-token="${esc(p.token)}">✖️ Odrzuć kartę</button></div>` : ''}`;
   for (const k of all) updateRow(k);
   if (F.serverParam) {
     const r = $(`.prm[data-p="${F.serverParam}"]`);
@@ -1007,7 +1062,7 @@ function screenConfirm(p) {
   if (!F.R) return back();
   const ch = changes(), show2 = s => esc(s === '' ? '—' : s);
   const name = p.mode === 'draft' ? p.draft.name : `#${p.job.id} ${p.job.name}`;
-  const waiting = lastState ? lastState.jobs.filter(j => ACTIVE.includes(j.state)).length : 0;
+  const waiting = lastState ? (lastState.queue || []).length + lastState.jobs.filter(j => j.state !== 'queued' && ACTIVE.includes(j.state)).length : 0;
   app.innerHTML = `${backLink()}<h1>Podsumowanie</h1><div class="sub">${esc(F.R.title)} · ${esc(name)}</div>
     <div class="sec pad">${describe(F.recipe, F.vals).map(l => `<div style="margin:3px 0">${l}</div>`).join('')}</div>
     <div class="sh">${p.mode === 'draft' ? 'Zmiany względem karty' : 'Zmiany względem #' + p.job.id}</div>
@@ -1049,6 +1104,7 @@ const ACTS = {
   hold: () => toggleHold(), allJobs: () => { showAllJobs = true; renderHome(); },
   job: el => go('job', { id: +el.dataset.id }),
   draft: el => { const d = lastDrafts[el.dataset.token]; if (d) go('form', { mode: 'draft', token: el.dataset.token, draft: d }); },
+  remove: () => removeJob(), cleanup: () => cleanup(), discard: el => discardDraft(el.dataset.token),
   stop: () => stopJob(), top: () => doTop(), retryForm: () => retryForm(), retrySame: () => retrySame(),
   extStep: el => extStep(+el.dataset.d), extend: el => doExtend(el),
   send: el => sendFile(el, el.dataset.path),

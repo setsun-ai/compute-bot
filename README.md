@@ -18,6 +18,11 @@ ostygnięcia. Po restarcie laptopa przerwane zadanie startuje znowu, a GROMACS w
 Pliki większe niż 20 MB (limit Telegrama): `/url LINK omics …` – Google Drive, Dropbox albo zwykły link; plik
 pobiera się w samym zadaniu i wznawia po przerwie.
 
+**Panel (Mini App)**: przycisk „Panel” obok pola wiadomości otwiera aplikację jak u BotFathera: kolejka na
+żywo z ETA, temperatura i dysk, wykresy i logi zadań, formularze parametrów, Stop/Ponów/Dolicz/Usuń. Działa
+przez Tailscale (telefon w tej samej sieci Tailscale); `/funnel on` udostępnia go bez Tailscale – wchodzi tylko
+podpisany Telegram właściciela.
+
 Komendy: `/jobs`, `/job N`, `/log N`, `/get N [plik]`, `/cancel N`, `/retry N [klucz=wartość]`, `/top N`,
 `/usun N`, `/usun stare`, `/pauza`, `/wznow`, `/co 3` (raport postępu co 3 h), `/cisza 23-7`, `/system`, `/env`,
 `/update`, `/rollback`, `/help [przepis]`. Bot ostrzega, gdy runner przestaje odpowiadać albo kończy się dysk.

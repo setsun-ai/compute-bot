@@ -100,8 +100,8 @@ def web_route_words():
 
 def test_every_path_word_the_page_uses_is_in_web_py_routing():
     words = web_route_words()
-    assert {"state", "recipes", "drafts", "jobs", "log", "file", "hold",
-            "cancel", "top", "retry", "send", "extend"} <= words
+    assert {"state", "recipes", "drafts", "jobs", "log", "file", "hold", "cleanup", "discard",
+            "cancel", "top", "retry", "send", "extend", "remove"} <= words
     for _, path in page_calls():
         static = [p for p in path.split("?")[0].strip("/").split("/")[1:] if "${" not in p]
         missing = [p for p in static if p not in words and p != "start"]  # drafts/TOKEN/<anything> starts the card
@@ -139,14 +139,16 @@ def test_every_api_call_of_the_page_is_routed_by_the_app(app):
         ("GET", "/api/state"), ("GET", "/api/drafts"), ("GET", "/api/recipes"), ("GET", "/api/jobs/1"),
         ("GET", "/api/jobs/1/log"), ("GET", "/api/jobs/1/file"), ("POST", "/api/hold"), ("POST", "/api/jobs/1/cancel"),
         ("POST", "/api/jobs/1/top"), ("POST", "/api/jobs/1/retry"), ("POST", "/api/jobs/1/send"),
-        ("POST", "/api/jobs/1/extend"), ("POST", "/api/drafts/777/start")}
-    for method, path in calls:
+        ("POST", "/api/jobs/1/extend"), ("POST", "/api/drafts/777/start"), ("POST", "/api/drafts/777/discard"),
+        ("POST", "/api/jobs/1/remove"), ("POST", "/api/cleanup")}
+    # removing job 1 last, so the other job routes still find it
+    for method, path in sorted(calls, key=lambda c: c[1].endswith("/remove")):
         url, query = concrete(path)
         try:
             if method == "GET":
                 app.get(url, query)
             else:
-                app.post(url, {"path": "a.txt", "ns": 1, "on": False, "params": {}})
+                app.post(url, {"path": "a.txt", "ns": 1, "on": False, "params": {}, "days": 7})
         except LookupError:
             pytest.fail(f"{method} {url} is not routed by web.App")
         except (ParamError, FileExistsError):
