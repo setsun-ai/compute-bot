@@ -127,3 +127,71 @@ def test_a_job_never_sees_the_bot_token(tmp_path, monkeypatch):
     job = script(store, 'echo "token=${TG_TOKEN:-none}" > env.txt')
     run_until(runner, store, job, jobs.FINAL)
     assert (store.work(job) / "env.txt").read_text() == "token=none\n"
+
+
+def test_hold_stops_the_job_and_starts_nothing_until_released(tmp_path):
+    store, runner = make(tmp_path)
+    first = script(store, "sleep 0.4; echo ok > out.txt")
+    second = script(store, "true")
+    run_until(runner, store, first, {"running"})
+    store.set_hold(True)
+    status = run_until(runner, store, first, {"paused"})
+    assert status.pause == "hold"
+    time.sleep(0.6)
+    runner.tick()
+    assert store.status(second).state == "queued"
+    store.set_hold(False)
+    run_until(runner, store, second, jobs.FINAL)
+    assert (store.work(first) / "out.txt").exists()
+
+
+def test_no_new_job_without_disk_space_and_the_runner_says_why(tmp_path):
+    store, runner = make(tmp_path)
+    runner.free_space = lambda: 500 * 1024 ** 2
+    job = script(store, "true")
+    runner.tick()
+    assert store.status(job).state == "queued"
+    assert store.runner_state()["blocked"] == "disk"
+    runner.free_space = lambda: 50 * 1024 ** 3
+    run_until(runner, store, job, jobs.FINAL)
+    assert store.runner_state()["blocked"] == ""
+
+
+def test_runner_leaves_a_heartbeat(tmp_path):
+    store, runner = make(tmp_path)
+    runner.tick()
+    state = store.runner_state()
+    assert state["time"] > 0 and state["job"] is None
+
+
+def test_fetch_downloads_then_runs_and_skips_what_is_already_there(tmp_path):
+    import http.server
+    import threading
+
+    payload = b"col\n1\n" * 1000
+    hits = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}/data.csv"
+    store, runner = make(tmp_path)
+    body = b"import os; open('seen.txt', 'w').write(str(os.path.getsize('data.csv')))"
+    job = store.create("python", "a.py", "a.py", {}, {"a.py": body}, fetch=[{"url": url, "name": "data.csv"}]).id
+    status = run_until(runner, store, job, jobs.FINAL)
+    assert status.state == "done", store.log_tail(job)
+    assert (store.work(job) / "seen.txt").read_text() == str(len(payload))
+    store.set_status(job, jobs.Status("queued", attempt=1))
+    run_until(runner, store, job, jobs.FINAL)
+    assert len(hits) == 1  # the second run found the file complete
+    server.shutdown()

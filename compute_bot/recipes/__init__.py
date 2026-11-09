@@ -93,7 +93,8 @@ class Recipe:
     def usage(self):
         lines = [f"<b>{self.title}</b> (<code>{self.name}</code>)", self.help, ""]
         for name, p in self.params.items():
-            default = "" if p.default in (None, "") else f" [{p.default if not isinstance(p.default, list) else ','.join(map(str, p.default))}]"
+            shown = ",".join(map(str, p.default)) if isinstance(p.default, list) else p.default
+            default = "" if p.default in (None, "") else f" [{shown}]"
             lines.append(f"<code>{name}=</code> {p.help} – {p.describe()}{default}")
         return "\n".join(lines)
 
@@ -138,9 +139,11 @@ RECIPES = {r.name: r for r in (
             "split_col": Param("str", "", "kolumna z podziałem (T/V, train/test, uczący/testowy)"),
             "every": Param("int", 3, "przy split=sorted: co który związek do testu", low=2, high=10),
             "test": Param("float", 0.25, "udział testu przy ks/random", low=0.05, high=0.5),
-            "descriptors": Param("list", ["given"], "skąd deskryptory", ("given", "rdkit", "mordred", "mopac", "morgan")),
+            "descriptors": Param("list", ["given"], "skąd deskryptory",
+                                 ("given", "rdkit", "mordred", "mopac", "morgan")),
             "max_desc": Param("int", 4, "najwięcej deskryptorów w modelu", low=1, high=20),
-            "select": Param("choice", "auto", "wybór zmiennych", ("auto", "exhaustive", "forward", "ga", "enet", "all")),
+            "select": Param("choice", "auto", "wybór zmiennych",
+                            ("auto", "exhaustive", "forward", "ga", "enet", "all")),
             "models": Param("list", list(QSAR_MODELS), "modele", QSAR_MODELS),
             "corr_max": Param("float", 0.95, "odrzuć deskryptor skorelowany z innym powyżej", low=0.5, high=1),
             "scramble": Param("int", 100, "liczba permutacji Y-scrambling", low=0, high=10000),
@@ -165,7 +168,8 @@ RECIPES = {r.name: r for r in (
             "drift": Param("choice", "auto", "korekta dryfu po QC", ("auto", "loess", "none")),
             "batch": Param("choice", "auto", "korekta partii", ("auto", "median", "none")),
             "qc_cv": Param("float", 0.3, "najwyższe CV w próbkach QC", low=0, high=5),
-            "test": Param("choice", "auto", "test statystyczny", ("auto", "ttest", "welch", "mwu", "anova", "kruskal", "lm")),
+            "test": Param("choice", "auto", "test statystyczny",
+                          ("auto", "ttest", "welch", "mwu", "anova", "kruskal", "lm")),
             "fdr": Param("float", 0.05, "próg FDR (Benjamini–Hochberg)", low=0.0001, high=0.5),
             "fc": Param("float", 1.0, "próg |log2 FC| na volcano", low=0, high=10),
             "annotate": Param("bool", True, "adnotacja białek z UniProt (internet)"),
@@ -183,7 +187,7 @@ RECIPES = {r.name: r for r in (
             "ligand_ref": Param("str", "", "nazwa ligandu krystalicznego wyznaczająca pudełko (np. STI)"),
             "residues": Param("str", "", "reszty kieszeni, np. A:45,A:88"),
             "center": Param("vec3", None, "środek pudełka [Å]"),
-            "size": Param("vec3", [22.0, 22.0, 22.0], "rozmiar pudełka [Å]"),
+            "size": Param("vec3", [22.0, 22.0, 22.0], "rozmiar pudełka [Å] (razem z center)"),
             "padding": Param("float", 6.0, "margines wokół ligandu/reszt [Å]", low=0, high=20),
             "exhaustiveness": Param("int", 8, "dokładność Vina", low=1, high=64),
             "poses": Param("int", 9, "liczba póz na ligand", low=1, high=30),
@@ -192,7 +196,7 @@ RECIPES = {r.name: r for r in (
             "scoring": Param("choice", "vina", "funkcja oceny", ("vina", "vinardo")),
             "seed": Param("int", 42, "ziarno"),
         },
-        inputs=(".zip", ".sdf", ".smi"), needs_file=False),
+        inputs=(".zip", ".sdf", ".smi", ".csv", ".tsv", ".mol2", ".pdb", ".cif"), needs_file=False),
     Recipe(
         "env", "Aktualizacja środowiska",
         "Doinstalowuje pakiety z deploy/environment.yml do środowiska conda (po aktualizacji bota).",

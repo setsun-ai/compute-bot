@@ -28,16 +28,18 @@ MAX_UPLOAD = 49 * 1024 ** 2  # and for files it can send
 ICONS = {"queued": "⏳", "running": "⚙️", "paused": "🌡️", "done": "✅", "failed": "❌", "cancelled": "⏹️"}
 HELP = (
     "🧪 <b>Kolejka obliczeń</b> na laptopie. Wyślij plik, a policzę i odeślę wyniki.\n\n"
-    "📦 <b>zip z run.sh</b> – dowolny skrypt (GROMACS, Python, R…); w skrypcie <code>md_step nazwa opcje-grompp</code> "
-    "wznawia mdrun po restarcie\n"
-    "📄 <b>.tpr</b> – od razu mdrun · <b>.ipynb</b> – wykonany notebook wraca · <b>.py</b> – skrypt\n"
+    "📦 <b>zip z run.sh</b> – dowolny skrypt; w nim <code>md_step nazwa opcje-grompp</code> wznawia mdrun "
+    "po restarcie\n"
+    "📄 <b>.tpr</b> – od razu mdrun · <b>.ipynb</b> – wraca wykonany · <b>.py</b> – skrypt\n"
     "🧬 <b>.pdb</b> albo <code>/md 1E0L T=600 ns=0.5</code> – cała dynamika z analizą\n"
-    "📊 <b>xlsx/csv</b> – zapytam: QSAR czy omika (albo podpisz plik: <code>qsar target=LogKd</code>)\n"
-    "💊 <code>/dock 1STP</code> + zip z ligandami – dokowanie\n\n"
-    "Parametry w podpisie pliku: <code>klucz=wartość</code>. Lista: /help md · /help qsar · /help omics · "
-    "/help dock\n\n"
-    "/jobs – kolejka · /job N – szczegóły · /log N · /get N [plik] · /cancel N · /retry N\n"
-    "/co 3 – raport postępu co 3 h (0 = tylko start i koniec) · /system – temperatura, RAM, dysk\n"
+    "📊 <b>xlsx/csv</b> – zapytam: QSAR czy omika (albo podpis <code>qsar target=LogKd</code>)\n"
+    "💊 zip z receptorem i ligandami + podpis <code>dock</code> – dokowanie\n"
+    "🔗 <code>/url LINK omics …</code> – plik większy niż 20 MB (Drive, Dropbox, link)\n\n"
+    "Parametry: /help md · /help qsar · /help omics · /help dock\n\n"
+    "/jobs – kolejka · /job N · /log N · /get N [plik] · /cancel N\n"
+    "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
+    "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
+    "/co 3 – raport postępu co 3 h · /cisza 23-7 – nocą bez dźwięku · /system\n"
     "/env – doinstaluj pakiety · /update · /rollback"
 )
 
@@ -100,7 +102,9 @@ class Bot:
         self.zip_budget = 45 * 1024 ** 2
         self.restart = False
         fresh = not self.state_path.exists()
-        self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "pending": {}}
+        self.local_hour = lambda: time.localtime(self.clock()).tm_hour
+        self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "pending": {}, "quiet": [23, 7],
+                      "runner_alert": ""}
         if not fresh:
             self.state.update(json.loads(self.state_path.read_text()))
         else:  # first start (or lost state): don't repeat news about old jobs
@@ -115,14 +119,27 @@ class Bot:
 
     # --- talking -----------------------------------------------------------------------------------
 
+    def quiet_now(self):
+        quiet = self.state["quiet"]
+        if not quiet:
+            return False
+        start, end, hour = quiet[0], quiet[1], self.local_hour()
+        return start <= hour < end if start < end else hour >= start or hour < end
+
+    def fields(self, **extra):
+        fields = {"chat_id": self.owner, "parse_mode": "HTML", **extra}
+        if self.quiet_now():
+            fields["disable_notification"] = True
+        return fields
+
     def say(self, text, markup=None):
-        fields = {"chat_id": self.owner, "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": True}
+        fields = self.fields(text=text[:4000], disable_web_page_preview=True)
         if markup:
             fields["reply_markup"] = markup
         return self.api("sendMessage", fields)
 
     def send_file(self, name, data, caption=""):
-        fields = {"chat_id": self.owner, "caption": caption[:1000], "parse_mode": "HTML"}
+        fields = self.fields(caption=caption[:1000])
         return self.api("sendDocument", fields, files={"document": (name, data)}, timeout=300)
 
     # --- what comes in --------------------------------------------------------------------------------
@@ -177,19 +194,19 @@ class Bot:
         rows = [[(r.title, f"f:{token}:{r.name}")] for r in options] + [[("✖️ Nic", f"f:{token}:-")]]
         self.say(f"Co zrobić z <b>{esc(name)}</b>?", keyboard(rows))
 
-    def queue(self, kind, entry, name, params, files):
+    def queue(self, kind, entry, name, params, files, fetch=()):
         if kind == "recipe":
             recipe = RECIPES[entry]
             params = recipe.validate(params)
-            if entry == "md" and not files and not params["pdb"]:
+            if entry == "md" and not files and not fetch and not params["pdb"]:
                 raise ParamError("Podaj kod PDB (/md 1E0L) albo wyślij plik .pdb.")
-            if entry == "dock" and not files and not params["receptor"]:
+            if entry == "dock" and not files and not fetch and not params["receptor"]:
                 raise ParamError("Dokowanie potrzebuje ligandów: wyślij zip z receptorem i ligandami albo plik "
                                  ".smi/.sdf z podpisem dock receptor=XXXX.")
         elif params:
             raise ParamError("Parametry klucz=wartość są tylko dla przepisów (md, qsar, omics, dock); "
                              "skrypt ustawia wszystko sam.")
-        spec = self.store.create(kind, entry, name, params, files)
+        spec = self.store.create(kind, entry, name, params, files, fetch)
         ahead = sum(1 for job, s in self.store.statuses().items() if job != spec.id and s.state not in jobs.FINAL)
         where = "zaraz startuje" if not ahead else f"przed nim: {ahead}"
         what = RECIPES[entry].title if kind == "recipe" else {"script": "skrypt run.sh", "tpr": "mdrun",
@@ -217,59 +234,149 @@ class Bot:
                 self.say(f"❌ {esc(e)}")
         elif parts[0] == "j" and len(parts) == 3 and parts[1].isdigit():
             self.handle_command(f"/{parts[2]} {parts[1]}")
+        elif parts[0] == "d" and len(parts) == 2:
+            self.remove_confirmed(parts[1])
 
     def handle_command(self, text):
         word, _, rest = text.partition(" ")
-        word = word[1:].split("@")[0].lower()
-        rest = rest.strip()
-        number = int(rest.split()[0]) if rest.split() and rest.split()[0].isdigit() else None
-        if word in ("start", "help", "menu", "pomoc"):
-            if rest in RECIPES:
-                return self.say(RECIPES[rest].usage())
-            return self.say(HELP)
+        word, rest = word[1:].split("@")[0].lower(), rest.strip()
         if word in RECIPES:
-            recipe = RECIPES[word]
-            if recipe.needs_file and word != "md":
-                return self.say(f"{esc(recipe.title)}: wyślij plik z podpisem <code>{word} …</code>.\n\n"
-                                + recipe.usage())
-            _, params = jobs.parse_caption(text)
-            return self.queue("recipe", word, word if word == "env" else f"{word} {rest}".strip(), params, {})
-        if word in ("jobs", "kolejka"):
-            return self.list_jobs()
-        if word == "system":
-            return self.say(self.system_info() + "\n" + self.queue_line())
-        if word == "co":
+            return self.recipe_command(word, text, rest)
+        general = {"start": self.help_command, "help": self.help_command, "menu": self.help_command,
+                   "pomoc": self.help_command, "jobs": self.list_jobs, "kolejka": self.list_jobs,
+                   "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
+                   "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
+                   "update": self.update_command, "rollback": self.rollback_command}
+        if word in general:
+            return general[word](rest)
+        if word == "usun" and rest == "stare":
+            return self.remove_old_command()
+        numbered = {"job": self.job_view, "log": self.log_command, "get": self.get_command,
+                    "cancel": self.cancel_command, "retry": self.retry_command, "top": self.top_command,
+                    "usun": self.remove_command}
+        if word not in numbered:
+            return self.say("Nie znam tej komendy. /help")
+        first, _, more = rest.partition(" ")
+        if not first.isdigit() or int(first) not in self.store.ids():
+            return self.say(f"Podaj numer zadania, np. /{word} 3. Lista: /jobs")
+        numbered[word](int(first), more.strip())
+
+    def help_command(self, rest):
+        self.say(RECIPES[rest].usage() if rest in RECIPES else HELP)
+
+    def recipe_command(self, word, text, rest):
+        recipe = RECIPES[word]
+        if recipe.needs_file and word != "md":
+            return self.say(f"{esc(recipe.title)}: wyślij plik z podpisem <code>{word} …</code> albo link: "
+                            f"<code>/url LINK {word} …</code>.\n\n" + recipe.usage())
+        _, params = jobs.parse_caption(text)
+        self.queue("recipe", word, word if word == "env" else f"{word} {rest}".strip(), params, {})
+
+    def system_command(self, _rest=""):
+        beat = self.store.runner_state()
+        runner = (f"runner: {'działa' if self.runner_alive(beat) else 'NIE ODPOWIADA'}"
+                  + (" · ⏸️ pauza" if self.store.hold else ""))
+        self.say(self.system_info() + "\n" + runner + "\n" + self.queue_line())
+
+    def report_command(self, rest):
+        try:
+            hours = float(rest.replace(",", "."))
+        except ValueError:
+            return self.say(f"Raport co {self.state['report_hours']:g} h. Zmiana: /co 2 (0 = wyłącz).")
+        self.state["report_hours"] = max(0.0, hours)
+        self.save()
+        self.say("Raporty postępu wyłączone." if not hours else f"Raport postępu co {hours:g} h.")
+
+    def quiet_command(self, rest):
+        if rest == "off":
+            self.state["quiet"] = None
+        else:
             try:
-                hours = float(rest.replace(",", "."))
+                start, end = (int(x) % 24 for x in rest.split("-"))
             except ValueError:
-                return self.say(f"Raport co {self.state['report_hours']:g} h. Zmiana: /co 2 (0 = wyłącz).")
-            self.state["report_hours"] = max(0.0, hours)
-            self.save()
-            return self.say("Raporty postępu wyłączone." if not hours else f"Raport postępu co {hours:g} h.")
-        if word == "update":
-            return self.update_command()
-        if word == "rollback":
-            return self.rollback_command()
-        if number is None or number not in self.store.ids():
-            return self.say("Podaj numer zadania, np. /job 3. Lista: /jobs")
-        if word == "job":
-            return self.job_view(number)
-        if word == "log":
-            return self.say(f"📜 <b>#{number}</b>\n<pre>{esc(self.store.log_tail(number, 3500))}</pre>")
-        if word == "get":
-            path = rest.split(maxsplit=1)[1] if len(rest.split(maxsplit=1)) > 1 else None
-            return self.get_command(number, path)
-        if word == "cancel":
-            if self.store.status(number).state in jobs.FINAL:
-                return self.say(f"#{number} już się skończyło.")
-            self.store.request_cancel(number)
-            return self.say(f"⏹️ Zatrzymuję #{number}…")
-        if word == "retry":
-            spec = self.store.spec(number)
-            files = self.store.inputs(number)
-            again = self.store.create(spec.kind, spec.entry, spec.name, spec.params, files)
-            return self.say(f"🔁 #{number} jeszcze raz jako <b>#{again.id}</b>.")
-        self.say("Nie znam tej komendy. /help")
+                quiet = self.state["quiet"]
+                now = f"{quiet[0]}–{quiet[1]}" if quiet else "wyłączona"
+                return self.say(f"Cisza nocna (wiadomości bez dźwięku): {now}. Zmiana: /cisza 23-7, /cisza off.")
+            self.state["quiet"] = [start, end]
+        self.save()
+        quiet = self.state["quiet"]
+        self.say(f"🌙 Cisza nocna {quiet[0]}:00–{quiet[1]}:00." if quiet else "🔔 Cisza nocna wyłączona.")
+
+    def hold_command(self, _rest=""):
+        self.store.set_hold(True)
+        self.say("⏸️ Pauza: bieżące zadanie zatrzymane, nowe nie startują. /wznow puszcza dalej.")
+
+    def release_command(self, _rest=""):
+        self.store.set_hold(False)
+        self.say("▶️ Wznawiam kolejkę.")
+
+    def url_command(self, rest):
+        link, _, caption = rest.partition(" ")
+        if not link:
+            return self.say("Użycie: <code>/url LINK [qsar|omics|dock|md|skrypt] [klucz=wartość…]</code>\n"
+                            "Google Drive (udostępnione: każdy z linkiem), Dropbox albo zwykły link; plik "
+                            "pobierze się w zadaniu, więc może być duży.")
+        word, params = jobs.parse_caption(caption)
+        kind, entry, name = jobs.detect_url(link, word)
+        self.queue(kind, entry, name, params, {}, fetch=[{"url": link, "name": name}])
+
+    def log_command(self, job, _rest=""):
+        self.say(f"📜 <b>#{job}</b>\n<pre>{esc(self.store.log_tail(job, 3500))}</pre>")
+
+    def cancel_command(self, job, _rest=""):
+        if self.store.status(job).state in jobs.FINAL:
+            return self.say(f"#{job} już się skończyło.")
+        self.store.request_cancel(job)
+        self.say(f"⏹️ Zatrzymuję #{job}…")
+
+    def retry_command(self, job, rest=""):
+        """The same files again; key=value after the number changes those parameters."""
+        spec = self.store.spec(job)
+        _, changes = jobs.parse_caption(rest)
+        params = dict(spec.params)
+        if changes:
+            if spec.kind != "recipe":
+                raise ParamError("Zmiana parametrów działa tylko dla przepisów.")
+            params = RECIPES[spec.entry].validate({**{k: _text(v) for k, v in spec.params.items()
+                                                      if v not in (None, "", [])}, **changes})
+        again = self.store.create(spec.kind, spec.entry, spec.name, params, self.store.inputs(job), spec.fetch)
+        self.say(f"🔁 #{job} jeszcze raz jako <b>#{again.id}</b>.")
+
+    def top_command(self, job, _rest=""):
+        if self.store.status(job).state != "queued":
+            return self.say(f"#{job} nie czeka w kolejce.")
+        self.store.set_priority(job, max(self.store.priorities().values(), default=0) + 1)
+        self.say(f"⏫ #{job} będzie następne.")
+
+    def remove_command(self, job, _rest=""):
+        if self.store.status(job).state not in jobs.FINAL:
+            return self.say(f"#{job} jeszcze się nie skończyło: najpierw /cancel {job}.")
+        size = sum(s for _, s in self.store.outputs(job))
+        self.say(f"🗑️ Usunąć #{job} ({esc(self.store.spec(job).name)}, {size_text(size)}) razem z wynikami? "
+                 "Tego nie da się cofnąć.", keyboard([[("🗑️ Tak, usuń", f"d:{job}"), ("Zostaw", "x")]]))
+
+    def remove_old_command(self, days=7):
+        now = self.clock()
+        old = [job for job, s in self.store.statuses().items()
+               if s.state in jobs.FINAL and s.finished and now - s.finished > days * 86400]
+        if not old:
+            return self.say(f"Nie ma zadań skończonych ponad {days} dni temu.")
+        size = sum(s for job in old for _, s in self.store.outputs(job))
+        listed = ", ".join(f"#{job}" for job in old)
+        self.say(f"🗑️ Usunąć {len(old)} zadań starszych niż {days} dni ({listed}; {size_text(size)})? "
+                 "Tego nie da się cofnąć.",
+                 keyboard([[("🗑️ Tak, usuń", "d:" + ",".join(map(str, old))), ("Zostaw", "x")]]))
+
+    def remove_confirmed(self, listed):
+        removed = []
+        for part in listed.split(","):
+            if part.isdigit() and int(part) in self.store.ids():
+                try:
+                    self.store.remove(int(part))
+                    removed.append(f"#{part}")
+                except ParamError as e:
+                    self.say(f"❌ {esc(e)}")
+        self.say("🗑️ Usunięte: " + ", ".join(removed) if removed else "Nic nie usunąłem.")
 
     # --- views --------------------------------------------------------------------------------------
 
@@ -278,7 +385,7 @@ class Bot:
         return (f"⚙️ liczy: {states.count('running') + states.count('paused')} · "
                 f"⏳ czeka: {states.count('queued')} · wersja {VERSION}")
 
-    def list_jobs(self):
+    def list_jobs(self, _rest=""):
         lines = []
         for job in self.store.ids()[-12:]:
             spec, status = self.store.spec(job), self.store.status(job)
@@ -286,7 +393,7 @@ class Bot:
             lines.append(f"{ICONS[status.state]} <b>#{job}</b> {esc(spec.name)}{extra}")
         self.say("\n".join(lines) or "Kolejka jest pusta.")
 
-    def job_view(self, job):
+    def job_view(self, job, _rest=""):
         spec, status = self.store.spec(job), self.store.status(job)
         lines = [f"{ICONS[status.state]} <b>#{job}</b> {esc(spec.name)} – {status.state}"]
         if status.started:
@@ -303,8 +410,8 @@ class Bot:
             buttons.append(("🔁 Ponów", f"j:{job}:retry"))
         self.say("\n".join(lines), keyboard([buttons]))
 
-    def get_command(self, job, rel):
-        if rel is None:
+    def get_command(self, job, rel=""):
+        if not rel:
             return self.send_results(job)
         path = self.store.result_file(job, rel)
         if path is None:
@@ -334,8 +441,38 @@ class Bot:
                     elapsed = duration(now - (status.started or now))
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
                              (f": {esc(status.progress)}" if status.progress else ""))
+        changed |= self.check_runner()
         if changed:
             self.save()
+
+    def runner_alive(self, beat):
+        return bool(beat) and self.clock() - beat.get("time", 0) < 180
+
+    def check_runner(self):
+        """Say once when the runner is silent with work waiting, or can't start for lack of disk, and when it's over."""
+        beat = self.store.runner_state()
+        waiting = any(s.state == "queued" for s in self.store.statuses().values())
+        if waiting and not self.runner_alive(beat):
+            alert = "dead"
+        elif beat.get("blocked") == "disk":
+            alert = "disk"
+        else:
+            alert = ""
+        before = self.state.get("runner_alert", "")
+        if alert == before:
+            return False
+        self.state["runner_alert"] = alert
+        if alert == "dead":
+            self.say("⚠️ Runner nie odpowiada od kilku minut, a zadania czekają. Laptop śpi albo usługa padła: "
+                     "<code>systemctl status compute-runner</code>.")
+        elif alert == "disk":
+            self.say(f"💾 Za mało miejsca na dysku ({size_text(beat.get('free', 0))} wolne), nowe zadania czekają. "
+                     "Zwolnij miejsce: /usun stare albo /usun N.")
+        elif before == "dead":
+            self.say("✅ Runner znowu działa.")
+        elif before == "disk":
+            self.say("✅ Miejsce na dysku jest, kolejka rusza.")
+        return True
 
     def announce(self, job, status, before):
         spec = self.store.spec(job)
@@ -343,11 +480,13 @@ class Bot:
         old_state, _, old_attempt = (before or "").partition(":")
         if status.state == "running":
             if old_state == "paused" and str(status.attempt) == old_attempt:
-                self.say(f"🌡️➡️⚙️ {title}: procesor ostygł, liczę dalej.")
+                self.say(f"▶️ {title}: liczę dalej.")
             elif status.attempt > 1:
                 self.say(f"🔁 {title} wznowione po przerwie (próba {status.attempt}).")
             else:
                 self.say(f"▶️ {title} – start.")
+        elif status.state == "paused" and status.pause == "hold":
+            self.say(f"⏸️ {title} wstrzymane (/wznow).")
         elif status.state == "paused":
             self.say(f"🌡️ {title}: za gorąco, wstrzymuję do ostygnięcia.")
         elif status.state == "done":
@@ -367,13 +506,14 @@ class Bot:
             body = summary.read_text(errors="replace")[:3200]
         else:
             body = self.store.log_tail(job, 1200)
-        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>")
+        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>",
+                 keyboard([[("📜 Log", f"j:{job}:log"), ("🔁 Ponów", f"j:{job}:retry"), ("🗑️ Usuń", f"j:{job}:usun")]]))
         highlights = work / "highlights.txt"
         if highlights.exists():
             for rel in highlights.read_text().split()[:4]:
                 path = self.store.result_file(job, rel)
                 if path and path.stat().st_size < 10 * 1024 ** 2:
-                    self.api("sendPhoto", {"chat_id": self.owner, "caption": rel},
+                    self.api("sendPhoto", self.fields(caption=esc(rel)),
                              files={"photo": (path.name, path.read_bytes())})
         archive, left_out = self.results_zip(job)
         self.send_file(f"wyniki_{job:04d}.zip", archive, f"#{job}")
@@ -399,7 +539,7 @@ class Bot:
 
     # --- updating itself --------------------------------------------------------------------------------
 
-    def update_command(self):
+    def update_command(self, _rest=""):
         if self.updater is None:
             return self.say("Aktualizacje są wyłączone w tej instalacji.")
         from .updater import UpdateError, version_tuple
@@ -415,7 +555,7 @@ class Bot:
                  f"zadanie.{note}")
         self.restart = True
 
-    def rollback_command(self):
+    def rollback_command(self, _rest=""):
         if self.updater is None:
             return self.say("Aktualizacje są wyłączone w tej instalacji.")
         from .updater import UpdateError
@@ -425,6 +565,15 @@ class Bot:
             return self.say(f"❌ {esc(e)}")
         self.say("↩️ Wracam do poprzedniej wersji.")
         self.restart = True
+
+
+def _text(value):
+    """A stored parameter back as the owner would type it, so /retry can validate it again with changes."""
+    if isinstance(value, bool):
+        return "tak" if value else "nie"
+    if isinstance(value, list):
+        return ",".join(map(str, value))
+    return str(value)
 
 
 def log(message):

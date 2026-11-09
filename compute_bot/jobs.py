@@ -6,7 +6,11 @@ rename), the runner alone writes its status, the bot alone touches the cancel fl
   jobs/0001/status.json   state, attempt, times, progress (runner)
   jobs/0001/log.txt       stdout + stderr of the job (runner)
   jobs/0001/cancel        the owner asked to stop it (bot)
+  jobs/0001/priority      the owner moved it up the queue (bot)
+  jobs/0001/input/        the files as sent, for /retry (bot)
   jobs/0001/work/         the owner's files, params.json, and everything the job writes
+  hold                    the owner paused everything (bot)
+  runner.json             heartbeat: time, current job, why nothing starts (runner)
 """
 from __future__ import annotations
 
@@ -15,7 +19,9 @@ import json
 import os
 import re
 import shlex
+import shutil
 import time
+import urllib.parse
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
@@ -36,6 +42,7 @@ class Spec(NamedTuple):
     name: str  # what the owner sent, for messages
     params: dict
     created: float
+    fetch: list = []  # [{"url", "name"}]: downloaded into work/ by the job itself before it starts
 
 
 class Status(NamedTuple):
@@ -45,6 +52,7 @@ class Status(NamedTuple):
     finished: float | None = None
     exit_code: int | None = None
     progress: str = ""
+    pause: str = ""  # while paused: "heat" or "hold"
 
 
 # --- what the owner typed and sent -------------------------------------------------------------------
@@ -82,6 +90,11 @@ def unpack(filename, data):
         archive = zipfile.ZipFile(io.BytesIO(data))
     except zipfile.BadZipFile:
         raise ParamError("To nie jest poprawny plik zip.") from None
+    return {target: archive.read(member) for member, target in zip_layout(archive).items()}
+
+
+def zip_layout(archive):
+    """Member → where it goes: no absolute or ../ paths, no macOS junk, no folder common to all files."""
     members = [m for m in archive.infolist() if not m.is_dir() and not m.filename.startswith("__MACOSX/")
                and not PurePosixPath(m.filename).name.startswith("._")]
     if sum(m.file_size for m in members) > MAX_UNPACKED:
@@ -92,13 +105,10 @@ def unpack(filename, data):
             raise ParamError(f"Niebezpieczna ścieżka w zipie: {path}")
     top = {p.parts[0] for p in paths}
     strip = len(top) == 1 and all(len(p.parts) > 1 for p in paths)
-    files = {}
-    for member, path in zip(members, paths):
-        name = str(PurePosixPath(*path.parts[1:])) if strip else str(path)
-        files[name] = archive.read(member)
-    if not files:
+    layout = {m: str(PurePosixPath(*p.parts[1:])) if strip else str(p) for m, p in zip(members, paths, strict=True)}
+    if not layout:
         raise ParamError("Zip jest pusty.")
-    return files
+    return layout
 
 
 def safe_name(filename):
@@ -129,8 +139,39 @@ def detect(filename, recipe_word, files):
     return None
 
 
+URL_WORDS = {"skrypt": ("script", "run.sh"), "script": ("script", "run.sh")}
+
+
+def detect_url(url, word):
+    """(kind, entry, file name) for a job whose input is a link; the file arrives only when the job runs."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ParamError("Link musi zaczynać się od http:// albo https://.")
+    name = PurePosixPath(urllib.parse.unquote(parsed.path)).name
+    named = bool(re.search(r"\.[A-Za-z0-9]{1,5}$", name)) and "drive.google.com" not in parsed.netloc
+    if not named:
+        name = "pobrany.zip" if word in URL_WORDS else "pobrany"
+    if word in URL_WORDS:
+        return (*URL_WORDS[word], name)
+    if word is not None:
+        if word not in RECIPES:
+            raise ParamError(f"Nie znam „{word}”. Są: {', '.join(RECIPES)}, skrypt.")
+        return "recipe", word, name
+    if named:
+        found = detect(name, None, {name: b""})
+        if found:
+            return (*found, name)
+    raise ParamError("Z linku nie widać, co to za plik. Dopisz słowo: qsar, omics, dock, md albo skrypt "
+                     "(zip z run.sh).")
+
+
 def command(spec, python):
-    """What the runner starts, in the job's work directory."""
+    """What the runner starts, in the job's work directory; files to fetch come first, in the same process."""
+    run = _command(spec, python)
+    return [python, "-m", "compute_bot.fetch", "--", *run] if spec.fetch else run
+
+
+def _command(spec, python):
     if spec.kind == "script":
         return ["bash", spec.entry]
     if spec.kind == "tpr":
@@ -148,9 +189,11 @@ def command(spec, python):
 
 # --- decisions (pure) ---------------------------------------------------------------------------------
 
-def next_job(statuses):
+def next_job(statuses, priorities=None):
+    """The queued job with the highest priority; among equals the oldest."""
+    priorities = priorities or {}
     queued = [job for job, status in statuses.items() if status.state == "queued"]
-    return min(queued) if queued else None
+    return min(queued, key=lambda job: (-priorities.get(job, 0), job)) if queued else None
 
 
 def recover(status):
@@ -160,7 +203,7 @@ def recover(status):
     if status.attempt >= MAX_ATTEMPTS:
         return status._replace(state="failed", finished=time.time(),
                                progress=f"przerwane {status.attempt} razy (restart?), nie próbuję dalej")
-    return status._replace(state="queued")
+    return status._replace(state="queued", pause="")
 
 
 def thermal_action(temp, paused, hot=HOT, cool=COOL):
@@ -212,7 +255,7 @@ class Store:
             return []
         return sorted(int(p.name) for p in self.jobs.iterdir() if p.name.isdigit() and (p / "spec.json").exists())
 
-    def create(self, kind, entry, name, params, files):
+    def create(self, kind, entry, name, params, files, fetch=()):
         """The directory gets its final name only when everything is in it: the runner never sees half a job."""
         self.jobs.mkdir(parents=True, exist_ok=True)
         taken = [int(p.name.split(".")[0]) for p in self.jobs.iterdir() if p.name.split(".")[0].isdigit()]
@@ -229,7 +272,7 @@ class Store:
                     target.chmod(0o755)
         if kind == "recipe":
             write_json(work / "params.json", params)
-        spec = Spec(job, kind, entry, name, params, time.time())
+        spec = Spec(job, kind, entry, name, params, time.time(), list(fetch))
         write_json(tmp / "spec.json", spec._asdict())
         os.replace(tmp, self.dir(job))
         return spec
@@ -255,6 +298,45 @@ class Store:
 
     def set_status(self, job, status):
         write_json(self.dir(job) / "status.json", status._asdict())
+
+    def set_priority(self, job, value):
+        (self.dir(job) / "priority").write_text(str(int(value)))
+
+    def priorities(self):
+        found = {}
+        for job in self.ids():
+            try:
+                found[job] = int((self.dir(job) / "priority").read_text())
+            except (FileNotFoundError, ValueError):
+                pass
+        return found
+
+    def remove(self, job):
+        if self.status(job).state not in FINAL:
+            raise ParamError(f"#{job} jeszcze się nie skończyło: najpierw /cancel {job}.")
+        shutil.rmtree(self.dir(job))
+
+    def set_hold(self, on):
+        flag = self.root / "hold"
+        if on:
+            self.root.mkdir(parents=True, exist_ok=True)
+            flag.touch()
+        else:
+            flag.unlink(missing_ok=True)
+
+    @property
+    def hold(self):
+        return (self.root / "hold").exists()
+
+    def runner_state(self):
+        try:
+            return json.loads((self.root / "runner.json").read_text())
+        except (FileNotFoundError, ValueError):
+            return {}
+
+    def set_runner_state(self, value):
+        self.root.mkdir(parents=True, exist_ok=True)
+        write_json(self.root / "runner.json", value)
 
     def request_cancel(self, job):
         (self.dir(job) / "cancel").touch()

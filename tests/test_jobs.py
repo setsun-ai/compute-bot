@@ -154,3 +154,47 @@ def test_progress_from_gromacs_and_recipe_lines():
     assert jobs.progress_from_log(log) == "krok 4200, koniec ok. Tue Nov 10 04:00:01 2026"
     assert jobs.progress_from_log("x\nPROGRESS: NPT 40%\nother\n") == "NPT 40%"
     assert jobs.progress_from_log("nothing") == ""
+
+
+# --- quality of life ------------------------------------------------------------------------------------
+
+def test_priority_jumps_the_queue_but_ties_keep_the_order():
+    statuses = {1: jobs.Status("queued"), 2: jobs.Status("queued"), 3: jobs.Status("queued")}
+    assert jobs.next_job(statuses, {3: 1}) == 3
+    assert jobs.next_job(statuses, {2: 1, 3: 1}) == 2
+
+
+def test_url_job_needs_a_kind_it_can_tell_from_the_link_or_a_word():
+    assert jobs.detect_url("https://x.org/a/md600.tpr", None) == ("tpr", "md600.tpr", "md600.tpr")
+    assert jobs.detect_url("https://x.org/dane.zip?dl=1", "skrypt") == ("script", "run.sh", "dane.zip")
+    assert jobs.detect_url("https://drive.google.com/file/d/ABC/view", "omics")[:2] == ("recipe", "omics")
+    with pytest.raises(ParamError):
+        jobs.detect_url("https://drive.google.com/file/d/ABC/view", None)
+    with pytest.raises(ParamError):
+        jobs.detect_url("file:///etc/passwd", "qsar")
+
+
+def test_store_keeps_priority_and_fetch_list(tmp_path):
+    store = jobs.Store(tmp_path)
+    link = [{"url": "https://x.org/r.tsv", "name": "r.tsv"}]
+    spec = store.create("recipe", "omics", "report.tsv", {}, {}, fetch=link)
+    assert store.spec(spec.id).fetch == [{"url": "https://x.org/r.tsv", "name": "r.tsv"}]
+    store.set_priority(spec.id, 1)
+    assert store.priorities() == {spec.id: 1}
+
+
+def test_a_job_with_files_to_fetch_starts_with_the_fetcher():
+    spec = jobs.Spec(1, "recipe", "qsar", "x", {}, 0, fetch=[{"url": "https://x.org/a.xlsx", "name": "a.xlsx"}])
+    assert jobs.command(spec, "/e/python") == ["/e/python", "-m", "compute_bot.fetch", "--",
+                                               "/e/python", "-m", "compute_bot.recipes.qsar"]
+
+
+def test_finished_job_can_be_removed_a_running_one_cannot(tmp_path):
+    store = jobs.Store(tmp_path)
+    store.create("script", "run.sh", "a.zip", {}, {"run.sh": b"true"})
+    store.set_status(1, jobs.Status("running", attempt=1))
+    with pytest.raises(ParamError):
+        store.remove(1)
+    store.set_status(1, jobs.Status("done", attempt=1))
+    store.remove(1)
+    assert store.ids() == []

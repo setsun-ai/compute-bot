@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import glob
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +24,8 @@ APP = Path(__file__).resolve().parent.parent
 BIN = Path(__file__).resolve().parent / "bin"
 PROGRESS_EVERY = 20  # seconds between progress updates in status.json
 KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL on cancel
+MIN_FREE = 2 * 1024 ** 3  # a new job starts only with this much free disk
+HEARTBEAT_EVERY = 30  # seconds between writes of runner.json
 
 
 def read_cpu_temp():
@@ -56,7 +59,9 @@ class Runner:
         self.read_temp, self.clock = read_temp, clock
         self.job = self.proc = self.log_file = None
         self.kill_at = None
-        self.last_progress = 0.0
+        self.last_progress = self.last_beat = 0.0
+        self.blocked = ""
+        self.free_space = lambda: shutil.disk_usage(store.root).free
 
     # --- lifecycle -------------------------------------------------------------------------------
 
@@ -72,6 +77,19 @@ class Runner:
             self.start_next()
         else:
             self.watch()
+        self.heartbeat()
+
+    def heartbeat(self, force=False):
+        now = self.clock()
+        if force or now - self.last_beat >= HEARTBEAT_EVERY:
+            self.last_beat = now
+            self.store.set_runner_state({"time": now, "job": self.job, "blocked": self.blocked,
+                                         "free": self.free_space(), "threads": self.threads})
+
+    def set_blocked(self, reason):
+        if reason != self.blocked:
+            self.blocked = reason
+            self.heartbeat(force=True)
 
     @property
     def idle(self):
@@ -98,9 +116,14 @@ class Runner:
             if status.state == "queued" and self.store.cancel_requested(job):
                 self.store.set_status(job, status._replace(state="cancelled", finished=self.clock()))
                 statuses[job] = self.store.status(job)
-        job = jobs.next_job(statuses)
+        job = jobs.next_job(statuses, self.store.priorities())
         if job is None:
-            return
+            return self.set_blocked("")
+        if self.store.hold:
+            return self.set_blocked("hold")
+        if self.free_space() < MIN_FREE:
+            return self.set_blocked("disk")
+        self.set_blocked("")
         spec = self.store.spec(job)
         status = statuses[job]
         cmd = jobs.command(spec, self.python)
@@ -144,16 +167,25 @@ class Runner:
             elif now >= self.kill_at:
                 self.signal(signal.SIGKILL)
             return
-        action = jobs.thermal_action(self.read_temp(), paused=status.state == "paused")
-        if action == "stop":
+        held = self.store.hold
+        if held and status.state != "paused":
             self.signal(signal.SIGSTOP)
-            self.store.set_status(job, status._replace(state="paused"))
-            log(f"job {job} paused: too hot")
-            return
-        if action == "cont":
+            self.store.set_status(job, status._replace(state="paused", pause="hold"))
+            return log(f"job {job} paused: hold")
+        if status.pause == "hold" and not held:
             self.signal(signal.SIGCONT)
-            status = status._replace(state="running")
+            status = status._replace(state="running", pause="")
             self.store.set_status(job, status)
+        if status.pause != "hold":
+            action = jobs.thermal_action(self.read_temp(), paused=status.state == "paused")
+            if action == "stop":
+                self.signal(signal.SIGSTOP)
+                self.store.set_status(job, status._replace(state="paused", pause="heat"))
+                return log(f"job {job} paused: too hot")
+            if action == "cont":
+                self.signal(signal.SIGCONT)
+                status = status._replace(state="running", pause="")
+                self.store.set_status(job, status)
         if now - self.last_progress >= PROGRESS_EVERY:
             self.last_progress = now
             progress = jobs.progress_from_log(self.store.log_tail(job, 20000))
@@ -169,10 +201,11 @@ class Runner:
             state = "done" if code == 0 else "failed"
         progress = jobs.progress_from_log(self.store.log_tail(job, 20000)) or status.progress
         self.store.set_status(job, status._replace(state=state, exit_code=code, finished=self.clock(),
-                                                   progress=progress))
+                                                   progress=progress, pause=""))
         log(f"job {job} {state} ({code})")
         self.job = self.proc = self.log_file = None
         self.last_progress = 0.0
+        self.heartbeat(force=True)
 
 
 

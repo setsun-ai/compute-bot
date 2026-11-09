@@ -19,7 +19,8 @@ def main():
     args = [tool, "env", "update", "-y", "-p", prefix, "-f", str(spec)] if "micromamba" in tool \
         else [tool, "env", "update", "-p", prefix, "-f", str(spec)]
     code = subprocess.call(args)
-    Path("summary.txt").write_text("Środowisko zaktualizowane.\n" if code == 0 else f"Aktualizacja nie wyszła ({code}).\n")
+    done = "Środowisko zaktualizowane.\n" if code == 0 else f"Aktualizacja nie wyszła ({code}).\n"
+    Path("summary.txt").write_text(done)
     return code
 
 

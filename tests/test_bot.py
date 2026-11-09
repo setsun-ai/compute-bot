@@ -254,3 +254,107 @@ def test_report_interval_is_kept(env, tmp_path):
     bot.handle_update(message("/co 1"))
     again = Bot(store, api, OWNER, tmp_path / "bot.json", clock=clock, system_info=lambda: "")
     assert again.state["report_hours"] == 1.0
+
+
+# --- quality of life ------------------------------------------------------------------------------------
+
+def test_pause_and_resume_everything(env):
+    bot, api, store, _ = env
+    bot.handle_update(message("/pauza"))
+    assert store.hold and "/wznow" in api.last_text()
+    bot.handle_update(message("/wznow"))
+    assert not store.hold
+
+
+def test_top_moves_a_job_up(env):
+    bot, api, store, _ = env
+    for name in ("a.zip", "b.zip"):
+        upload(bot, api, name, zip_bytes({"run.sh": "true"}))
+    bot.handle_update(message("/top 2"))
+    assert store.priorities() == {2: 1}
+
+
+def test_retry_with_changed_parameters(env):
+    bot, api, store, _ = env
+    bot.handle_update(message("/md 1E0L T=600"))
+    store.set_status(1, jobs.Status("done", attempt=1))
+    bot.handle_update(message("/retry 1 T=500 ns=2"))
+    spec = store.spec(2)
+    assert (spec.params["T"], spec.params["ns"], spec.params["pdb"]) == (500.0, 2.0, "1E0L")
+
+
+def test_remove_needs_a_confirmation_tap(env):
+    bot, api, store, _ = env
+    finished_job(store, {"big.xtc": b"x" * 10})
+    bot.handle_update(message("/usun 1"))
+    assert store.ids() == [1]
+    markup = json.loads(api.sent("sendMessage")[-1][1]["reply_markup"])
+    tap(bot, markup["inline_keyboard"][0][0]["callback_data"])
+    assert store.ids() == []
+
+
+def test_remove_old_finished_jobs(env):
+    bot, api, store, clock = env
+    old = finished_job(store, {})
+    store.set_status(old, store.status(old)._replace(finished=clock.now - 8 * 86400))
+    recent = finished_job(store, {})
+    store.set_status(recent, store.status(recent)._replace(finished=clock.now - 3600))
+    running = store.create("script", "run.sh", "x.zip", {}, {"run.sh": b"true"}).id
+    store.set_status(running, jobs.Status("running", attempt=1))
+    bot.handle_update(message("/usun stare"))
+    assert f"#{old}" in api.last_text() and f"#{recent}" not in api.last_text()
+    markup = json.loads(api.sent("sendMessage")[-1][1]["reply_markup"])
+    tap(bot, markup["inline_keyboard"][0][0]["callback_data"])
+    assert store.ids() == [recent, running]
+
+
+def test_link_makes_a_job_that_fetches_its_file(env):
+    bot, api, store, _ = env
+    bot.handle_update(message("/url https://drive.google.com/file/d/ABC/view omics group=grupa"))
+    (spec,) = store.specs()
+    assert (spec.kind, spec.entry, spec.params["group"]) == ("recipe", "omics", "grupa")
+    assert spec.fetch == [{"url": "https://drive.google.com/file/d/ABC/view", "name": "pobrany"}]
+
+
+def test_quiet_hours_send_without_sound(env):
+    bot, api, store, _ = env
+    bot.local_hour = lambda: 2
+    bot.handle_update(message("/jobs"))
+    assert api.sent("sendMessage")[-1][1]["disable_notification"] is True
+    bot.local_hour = lambda: 14
+    bot.handle_update(message("/jobs"))
+    assert "disable_notification" not in api.sent("sendMessage")[-1][1]
+    bot.handle_update(message("/cisza off"))
+    bot.local_hour = lambda: 2
+    bot.handle_update(message("/jobs"))
+    assert "disable_notification" not in api.sent("sendMessage")[-1][1]
+
+
+def test_silent_runner_with_work_waiting_is_reported_once_and_its_return_too(env):
+    bot, api, store, clock = env
+    store.create("script", "run.sh", "x.zip", {}, {"run.sh": b"true"})
+    store.set_runner_state({"time": clock.now - 600, "job": None, "blocked": ""})
+    bot.tick()
+    bot.tick()
+    assert sum("runner" in t.lower() and "nie" in t for t in api.texts()) == 1
+    store.set_runner_state({"time": clock.now, "job": None, "blocked": ""})
+    bot.tick()
+    assert "znowu" in api.last_text()
+
+
+def test_full_disk_is_reported_once(env):
+    bot, api, store, clock = env
+    store.create("script", "run.sh", "x.zip", {}, {"run.sh": b"true"})
+    store.set_runner_state({"time": clock.now, "job": None, "blocked": "disk", "free": 10 ** 9})
+    bot.tick()
+    bot.tick()
+    assert sum("dysk" in t for t in api.texts()) == 1
+
+
+def test_results_come_with_buttons(env):
+    bot, api, store, _ = env
+    finished_job(store, {"summary.txt": b"ok"})
+    bot.tick()
+    summary_msg = next(c for c in api.sent("sendMessage") if "ok" in c[1]["text"])
+    data = [b["callback_data"] for row in json.loads(summary_msg[1]["reply_markup"])["inline_keyboard"] for b in row]
+    assert "j:1:retry" in data and "j:1:usun" in data

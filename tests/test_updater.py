@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from compute_bot import VERSION, updater
-from compute_bot.updater import Updater, UpdateError, chosen_app
+from compute_bot.updater import UpdateError, Updater, chosen_app
 
 REPO = Path(__file__).resolve().parent.parent
 
