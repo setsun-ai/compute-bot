@@ -21,8 +21,11 @@ UMask=0007
 Nice=19
 CPUSchedulingPolicy=batch
 IOSchedulingClass=idle
-MemoryHigh=80%
-MemoryMax=90%
+# The laptop has 8 GB: jobs get 6, so the system, the bots and an AMP server always keep 2. Above 5 GB the
+# kernel reclaims the job's memory first; at 6 GB the job (not the laptop) is killed.
+MemoryHigh=5G
+MemoryMax=6G
+MemorySwapMax=2G
 # A stopped runner takes its job with it; on start it runs it again (md_step resumes from the checkpoint).
 KillMode=control-group
 TimeoutStopSec=30
