@@ -971,11 +971,11 @@ def _lines(log):
     return [ln for ln in log.read_text().splitlines() if ln]
 
 
-def run_recipe(work: Path, extra_env=None, **p) -> subprocess.CompletedProcess:
+def run_recipe(work: Path, extra_env=None, timeout=600, **p) -> subprocess.CompletedProcess:
     (work / "params.json").write_text(json.dumps(params(**p)))
     env = dict(os.environ, PYTHONPATH=str(REPO), **(extra_env or {}))
     return subprocess.run([sys.executable, "-m", "compute_bot.recipes.charmm"], cwd=work, env=env,
-                          capture_output=True, text=True, timeout=600)
+                          capture_output=True, text=True, timeout=timeout)
 
 
 def _csv(path):
@@ -1177,7 +1177,8 @@ def test_real_openmm_package_short_run(tmp_path):
     eq = K.openmm_edit(eq, {"nsteps": (200, 0), "traj_every": (50, 0)})
     eq = eq.replace("mini_nstep  = 5000", "mini_nstep  = 50")
     (o / "step4_equilibration.inp").write_text(eq)
-    proc = run_recipe(work, {"COMPUTE_THREADS": "4"}, ns=0.0004, engine="openmm")
+    # 30 min while CI tells whether this real package is slow or stuck on a 2-core runner (it hit 600 s once).
+    proc = run_recipe(work, {"COMPUTE_THREADS": "4"}, timeout=1800, ns=0.0004, engine="openmm")
     assert proc.returncode == 0, proc.stderr[-3000:]
     summary = (work / "summary.txt").read_text()
     assert "→ OpenMM" in summary and "CHARMM36m" in summary

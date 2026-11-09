@@ -653,26 +653,19 @@ def test_end_to_end_1l2y_with_interrupt_and_resume(tmp_path):
     cmd = [sys.executable, "-m", "compute_bot.recipes.md"]
     gdir = work / "gromacs"
 
-    # run 1: interrupted in the middle of production (TERM to the whole group, like a shutdown)
+    # run 1: a power cut (SIGKILL to the whole group) once production has written a checkpoint. Checkpoints come
+    # every ~0.3 s here, and the test waits for the file itself instead of guessing from timing (a TERM sent
+    # right at production start found no checkpoint on a slower CI runner).
     t0 = time.time()
-    proc = subprocess.Popen(cmd, cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            start_new_session=True)
+    proc = subprocess.Popen(cmd, cwd=work, env=dict(env, MD_CHECKPOINT_MIN="0.005"), stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL, start_new_session=True)
     seen = []
-    for line in proc.stdout:
-        seen.append(line)
-        if line.startswith("PROGRESS:") and "produkcja" in line and "krok" in line:
-            break
-    else:
-        proc.wait()
-        pytest.fail("production never started:\n" + "".join(seen[-40:]))
-    os.killpg(proc.pid, signal.SIGTERM)
+    while not (gdir / "md.cpt").exists():
+        if proc.poll() is not None:
+            pytest.fail("production ended before its first checkpoint")
+        time.sleep(0.1)
+    os.killpg(proc.pid, signal.SIGKILL)
     proc.wait(timeout=60)
-    for _ in range(120):  # wait for mdrun to write its checkpoint and exit
-        try:
-            os.killpg(proc.pid, 0)
-        except ProcessLookupError:
-            break
-        time.sleep(0.5)
     assert (gdir / "md.cpt").exists(), "".join(seen[-40:])
     assert not (gdir / "md.gro").exists()
     t_first = time.time() - t0
