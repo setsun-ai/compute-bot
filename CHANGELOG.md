@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.0 (2026-11)
+
+- **Przewodnik** (`/guide`, 📖 w panelu, `docs/przewodnik.md`): pierwsze kroki, dynamika, QSAR, omika, dokowanie,
+  CHARMM-GUI/NAMD, skrypty, wyniki, praca zdalna, rozwiązywanie problemów – z przykładami „Wypróbuj”.
+- **Duże wyniki:** link do pobrania ważny 24 h (wznawialny), polecenie `scp`, a bez Tailscale kawałki po 45 MB
+  (`/get N plik czesci`).
+- **Lipidomika w `omics`:** tabele z Profindera/MFE i MZmine 3, projekt sparowany (`pair=`, Wilcoxon dla par),
+  uśrednianie replikatów technicznych, klasy lipidów z nazw, KMD, Van Krevelen, RT vs m/z, Venn.
+- Bot sam pisze o nowej wersji (raz, z przyciskiem instalacji); `/start` wita przewodnikiem i przykładem.
+- Panel: przewodnik, przykłady, pobieranie dużych plików.
+
 ## 0.1.3 (2026-11)
 
 - **Instalator działa z katalogu domowego.** Uruchomiony z `~/Documents/...` padał na
