@@ -638,9 +638,8 @@ class Bot:
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
         changed |= self.check_for_update(now)
-        for token in list(self.state["drafts"]):
-            if (self.store.root / "staging" / token / actions.CLOSED).exists():
-                self.drop(token)  # started from the Mini App
+        for closed in (self.store.root / "staging").glob(f"*/{actions.CLOSED}"):
+            self.drop(closed.parent.name)  # started or discarded in the Mini App (its own cards too)
         if changed:
             self.save()
 

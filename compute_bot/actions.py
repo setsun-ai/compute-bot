@@ -77,7 +77,7 @@ def start_staged(store, folder, recipe, name, typed, fetch=()):
     params = RECIPES[recipe].validate(typed)
     if recipe == "md" and not params["pdb"] and not fetch and not any(folder.iterdir()):
         raise ParamError("Podaj kod PDB albo wyślij plik .pdb.")
-    files = {str(p.relative_to(folder)): p for p in folder.rglob("*") if p.is_file()}
+    files = {str(p.relative_to(folder)): p for p in folder.rglob("*") if p.is_file() and p.name != "draft.json"}
     marker.touch()
     spec = store.create("recipe", recipe, name, params, files, fetch)
     return spec

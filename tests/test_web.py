@@ -221,3 +221,33 @@ def test_discard_a_card(server, tmp_path):
     assert call(base, "/api/drafts/55/discard", {})[0] == 200
     assert call(base, "/api/drafts")[1] == {}
     assert call(base, "/api/drafts/55/start", {"params": {}})[0] == 409
+
+
+def test_panel_can_ask_for_a_download_link(server):
+    store, base, app = server
+    store.create("script", "run.sh", "a.zip", {}, {"run.sh": b"true"})
+    (store.work(1) / "big.xtc").write_bytes(b"traj")
+    code, made = call(base, "/api/jobs/1/link", {"path": "big.xtc"})
+    assert code == 200 and made["url"].startswith("/dl/")
+    with urllib.request.urlopen(base + made["url"], timeout=5) as response:  # no Telegram header needed
+        assert response.read() == b"traj"
+    assert call(base, "/api/jobs/1/link", {"path": "../spec.json"})[0] == 404
+
+
+def test_panel_can_open_an_example_as_a_card_the_bot_then_shows(server, tmp_path):
+    store, base, _ = server
+    code, made = call(base, "/api/examples/qsar/draft", {})
+    assert code == 200
+    token = made["token"]
+    assert (tmp_path / "staging" / token / "przyklad_qsar.csv").exists()
+    _, drafts = call(base, "/api/drafts")
+    assert drafts[token]["recipe"] == "qsar" and drafts[token]["params"] == {"max_desc": "2"}
+    code, started = call(base, f"/api/drafts/{token}/start", {"params": {}})
+    assert code == 200 and store.spec(started["id"]).entry == "qsar"
+    assert call(base, "/api/examples/nope/draft", {})[0] == 404
+
+
+def test_guide_is_served(server):
+    _, base, _ = server
+    code, topics = call(base, "/api/guide")
+    assert code == 200 and {"start", "md", "wyniki"} <= {t["id"] for t in topics}
