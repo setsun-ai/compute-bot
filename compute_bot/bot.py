@@ -13,19 +13,22 @@ import html
 import io
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, actions, drafts, jobs
+from . import VERSION, actions, drafts, jobs, links
 from .drafts import keyboard
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
 
 MAX_DOWNLOAD = 20 * 1024 ** 2  # Telegram's limit for files a bot can download
 MAX_UPLOAD = 49 * 1024 ** 2  # and for files it can send
+PART = 45 * 1024 ** 2  # a big file sent in pieces: size of one piece
+MAX_PARTS_TOTAL = 1024 ** 3  # beyond this, pieces through Telegram stop making sense
 ICONS = {"queued": "⏳", "running": "⚙️", "paused": "🌡️", "done": "✅", "failed": "❌", "cancelled": "⏹️"}
 HELP = (
     "🧪 <b>Kolejka obliczeń</b> na laptopie. Wyślij plik, a policzę i odeślę wyniki.\n\n"
@@ -94,8 +97,9 @@ def system_info(home="."):
 
 class Bot:
     def __init__(self, store, api, owner, state_path, updater=None, clock=time.time, system_info=system_info,
-                 web_url=None, exposure=None):
+                 web_url=None, exposure=None, link_secret="", ssh_target=None):
         self.web_url, self.exposure = web_url, exposure
+        self.link_secret, self.ssh_target = link_secret, ssh_target  # download links; user@host for scp
         self.store, self.api, self.owner = store, api, owner
         self.state_path, self.updater, self.clock = Path(state_path), updater, clock
         self.system_info = system_info
@@ -517,12 +521,56 @@ class Bot:
     def get_command(self, job, rel=""):
         if not rel:
             return self.send_results(job)
+        if rel.endswith(" czesci"):
+            return self.send_parts(job, rel[:-len(" czesci")].strip())
         path = self.store.result_file(job, rel)
         if path is None:
             return self.say(f"Nie ma pliku {esc(rel)} w #{job}.")
         if path.stat().st_size > MAX_UPLOAD:
-            return self.say(f"{esc(rel)} ma {size_text(path.stat().st_size)}; Telegram przyjmie najwyżej 50 MB.")
+            return self.say(*self.big_files(job, [(rel, path.stat().st_size)]))
         self.send_file(path.name, path.read_bytes(), f"#{job}")
+
+    def big_files(self, job, files):
+        """How to get files Telegram won't carry: a link through the panel's address, scp, or pieces."""
+        lines = ["📦 Za duże na Telegram (limit 50 MB):"]
+        buttons = []
+        for rel, size in files[:8]:
+            lines.append(f"• <b>{esc(rel)}</b> ({size_text(size)})")
+            if self.ssh_target:
+                where = self.store.work(job) / rel
+                lines.append(f"  <code>scp {esc(self.ssh_target)}:{esc(shlex.quote(str(where)))} .</code>")
+            if self.web_url:
+                token = links.make(self.link_secret, job, rel, self.clock() + links.DAY)
+                buttons.append([(f"⬇️ {PurePosixPath(rel).name} ({size_text(size)})",
+                                 f"url:{self.web_url.rstrip('/')}/dl/{token}")])
+            elif not self.ssh_target and size <= MAX_PARTS_TOTAL:
+                lines.append(f"  <code>/get {job} {esc(rel)} czesci</code> – w kawałkach po 45 MB")
+        if len(files) > 8:
+            lines.append(f"… i {len(files) - 8} innych: /job {job}")
+        if self.web_url:
+            lines.append("Linki działają 24 h, na urządzeniu z Tailscale (albo po /funnel on); przerwane pobieranie "
+                         "można wznowić.")
+        if self.ssh_target:
+            lines.append(f"Cały katalog: <code>scp -r {esc(self.ssh_target)}:{esc(str(self.store.work(job)))} .</code>")
+        if not self.web_url and not self.ssh_target:
+            lines.append("Wygodniej: <code>sudo bash deploy/remote.sh</code> na laptopie – wtedy dostajesz link do "
+                         "pobrania i scp.")
+        return "\n".join(lines), keyboard(buttons) if buttons else None
+
+    def send_parts(self, job, rel):
+        path = self.store.result_file(job, rel)
+        if path is None:
+            return self.say(f"Nie ma pliku {esc(rel)} w #{job}.")
+        size = path.stat().st_size
+        if size > MAX_PARTS_TOTAL:
+            return self.say(f"{esc(rel)} ma {size_text(size)}: to za dużo na kawałki przez Telegram. Na laptopie "
+                            "<code>sudo bash deploy/remote.sh</code> da link do pobrania i scp.")
+        count = -(-size // PART)
+        with open(path, "rb") as source:
+            for number in range(1, count + 1):
+                self.send_file(f"{path.name}.part{number:02d}", source.read(PART), f"#{job} {number}/{count}")
+        self.say(f"Sklej w folderze z kawałkami:\n<code>cat {esc(path.name)}.part* &gt; {esc(path.name)}</code>\n"
+                 f"(Windows: <code>copy /b {esc(path.name)}.part* {esc(path.name)}</code>)")
 
     # --- news about jobs ------------------------------------------------------------------------------
 
@@ -624,10 +672,14 @@ class Bot:
                              files={"photo": (path.name, path.read_bytes())})
         archive, left_out = self.results_zip(job)
         self.send_file(f"wyniki_{job:04d}.zip", archive, f"#{job}")
-        if left_out:
-            shown = "\n".join(f"<code>/get {job} {esc(rel)}</code> ({size_text(size)})" for rel, size in left_out[:10])
-            more = f"\n… i {len(left_out) - 10} innych" if len(left_out) > 10 else ""
-            self.say(f"📎 Za duże do zipa, pobierz osobno (do 50 MB):\n{shown}{more}")
+        small = [(rel, size) for rel, size in left_out if size <= MAX_UPLOAD]
+        big = [(rel, size) for rel, size in left_out if size > MAX_UPLOAD]
+        if small:
+            shown = "\n".join(f"<code>/get {job} {esc(rel)}</code> ({size_text(size)})" for rel, size in small[:10])
+            more = f"\n… i {len(small) - 10} innych" if len(small) > 10 else ""
+            self.say(f"📎 Nie zmieściły się w zipie, pobierz osobno:\n{shown}{more}")
+        if big:
+            self.say(*self.big_files(job, big))
 
     def results_zip(self, job):
         """Smallest files first until the zip would get too big for Telegram; the log always goes in."""
@@ -749,7 +801,8 @@ def main(argv):
     from .exposure import Exposure
     web_url = os.environ.get("WEB_URL") or None  # written by deploy/remote.sh once Tailscale serves the panel
     bot = Bot(store, api, int(owner), home / "bot.json", updater=Updater(home / "update"),
-              system_info=lambda: system_info(home), web_url=web_url,
+              system_info=lambda: system_info(home), web_url=web_url, link_secret=token,
+              ssh_target=os.environ.get("SSH_TARGET") or None,
               exposure=Exposure(int(os.environ.get("WEB_PORT", "8787"))))
     if web_url:
         try:  # the "Panel" button next to the message field, like BotFather's Open

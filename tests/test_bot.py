@@ -521,3 +521,45 @@ def test_funnel_on_and_off(panel):
     assert "włączony" in api.last_text()
     bot.handle_update(message("/funnel off"))
     assert exposure.calls == [True, False]
+
+
+# --- results too big for Telegram -----------------------------------------------------------------------
+
+def big_job(store, size=60 * 1024 ** 2):
+    job = finished_job(store, {"small.txt": b"ok"})
+    with open(store.work(job) / "traj.xtc", "wb") as f:
+        f.truncate(size)  # sparse: no disk used
+    return job
+
+
+def test_with_the_panel_a_big_file_gets_a_download_link_and_scp(panel):
+    bot, api, store, _ = panel
+    bot.ssh_target = "nekki@serwer.example.ts.net"
+    job = big_job(store)
+    bot.tick()
+    text = next(t for t in api.texts() if "traj.xtc" in t)
+    assert "scp nekki@serwer.example.ts.net:" in text and f"jobs/{job:04d}/work/traj.xtc" in text
+    link = next(b["url"] for b in last_buttons(api) if "url" in b)
+    assert link.startswith("https://vostro.example.ts.net/dl/")
+    from compute_bot import links
+    assert links.parse(bot.link_secret, link.rsplit("/", 1)[1], bot.clock()) == (job, "traj.xtc")
+
+
+def test_without_the_panel_a_big_file_can_come_in_parts(env):
+    bot, api, store, _ = env
+    job = big_job(store, size=100 * 1024 ** 2)
+    bot.tick()
+    assert any(f"/get {job} traj.xtc czesci" in t for t in api.texts())
+    bot.handle_update(message(f"/get {job} traj.xtc"))
+    assert "czesci" in api.last_text()
+    bot.handle_update(message(f"/get {job} traj.xtc czesci"))
+    parts = [c[2]["document"][0] for c in api.sent("sendDocument") if c[2]["document"][0].startswith("traj.xtc.")]
+    assert parts == ["traj.xtc.part01", "traj.xtc.part02", "traj.xtc.part03"]
+    assert "cat traj.xtc.part* &gt; traj.xtc" in api.last_text()  # HTML: shown as >
+
+
+def test_files_too_big_even_for_parts_point_to_remote_access(env):
+    bot, api, store, _ = env
+    job = big_job(store, size=3 * 1024 ** 3)
+    bot.handle_update(message(f"/get {job} traj.xtc czesci"))
+    assert "remote.sh" in api.last_text() and api.sent("sendDocument") == []

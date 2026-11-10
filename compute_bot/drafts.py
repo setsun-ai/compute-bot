@@ -17,7 +17,9 @@ PER_ROW = 3
 
 
 def button(text, data):
-    """A tap goes back to the bot; an https address opens the Mini App instead."""
+    """A tap goes back to the bot; an https address opens the Mini App; "url:https://…" opens the browser."""
+    if data.startswith("url:"):
+        return {"text": text, "url": data[4:]}
     if data.startswith("https://"):
         return {"text": text, "web_app": {"url": data}}
     return {"text": text, "callback_data": data}

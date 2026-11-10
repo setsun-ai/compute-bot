@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -23,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import VERSION, actions, jobs
+from . import VERSION, actions, jobs, links
 from .recipes import RECIPES, ParamError, quick_values
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
@@ -260,7 +261,41 @@ def make_server(app, host, port):
             except ValueError:
                 return self.reply(HTTPStatus.BAD_REQUEST, {"error": "zła treść zapytania"})
 
+        def download(self):
+            """A signed link from the bot (links.py): the file as an attachment, resumable with Range."""
+            address = self.address()
+            if app.blocked(address):
+                return self.reply(HTTPStatus.TOO_MANY_REQUESTS)
+            found = links.parse(app.token, self.path[len("/dl/"):].split("?")[0], app.clock())
+            path = app.store.result_file(*found) if found and found[0] in app.store.ids() else None
+            if path is None:
+                app.failed(address)
+                return self.reply(HTTPStatus.NOT_FOUND)
+            size = path.stat().st_size
+            start = 0
+            match = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range") or "")
+            if match and int(match[1]) < size:
+                start = int(match[1])
+            self.send_response(HTTPStatus.PARTIAL_CONTENT if start else HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size - start))
+            self.send_header("Accept-Ranges", "bytes")
+            if start:
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            name = urllib.parse.quote(path.name)
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{name}; filename=\"{path.name}\"")
+            self.end_headers()
+            with open(path, "rb") as source:
+                source.seek(start)
+                while chunk := source.read(1024 * 1024):
+                    try:
+                        self.wfile.write(chunk)
+                    except OSError:
+                        return  # the browser went away; it can resume with Range
+
         def do_GET(self):
+            if self.path.startswith("/dl/"):
+                return self.download()
             if self.path.startswith("/api/"):
                 return self.handle_api("GET")
             if urllib.parse.urlparse(self.path).path in ("/", "/index.html"):
