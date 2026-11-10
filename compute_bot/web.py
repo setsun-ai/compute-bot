@@ -24,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import VERSION, actions, jobs, links
+from . import VERSION, actions, guide, jobs, links
 from .recipes import RECIPES, ParamError, quick_values
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
@@ -134,6 +134,8 @@ class App:
             return self.state()
         if parts == ["recipes"]:
             return recipes_json()
+        if parts == ["guide"]:
+            return [topic._asdict() for topic in guide.TOPICS]
         if parts == ["drafts"]:
             return self.drafts()
         job = self.job_id(parts)

@@ -20,7 +20,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, actions, drafts, jobs, links
+from . import VERSION, actions, drafts, examples, guide, jobs, links
 from .drafts import keyboard
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
@@ -40,6 +40,7 @@ HELP = (
     "💊 zip z receptorem i ligandami + podpis <code>dock</code> – dokowanie\n"
     "🔗 <code>/url LINK omics …</code> – plik większy niż 20 MB (Drive, Dropbox, link)\n\n"
     "Parametry: /help md · /help qsar · /help omics · /help dock\n\n"
+    "/guide – przewodnik krok po kroku z przykładami do wypróbowania\n"
     "/jobs – kolejka · /job N · /log N · /get N [plik] · /cancel N\n"
     "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
     "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
@@ -306,6 +307,14 @@ class Bot:
                 return self.handle_command(f"/{parts[1]} {parts[0]}")
             if action == "d" and len(parts) == 1:
                 return self.remove_confirmed(parts[0])
+            if action == "g":
+                return self.show(message_id, *self.guide_view(rest))
+            if action == "t":
+                return self.try_example(rest)
+            if action == "h":
+                return self.help_command(rest)
+            if action == "u" and rest == "install":
+                return self.update_command()
         except ParamError as e:
             self.say(f"❌ {esc(e)}")
 
@@ -325,8 +334,9 @@ class Bot:
         word, rest = word[1:].split("@")[0].lower(), rest.strip()
         if word in RECIPES:
             return self.recipe_command(word, text, rest)
-        general = {"start": self.help_command, "help": self.help_command, "menu": self.help_command,
-                   "pomoc": self.help_command, "jobs": self.list_jobs, "kolejka": self.list_jobs,
+        general = {"start": self.start_command, "help": self.help_command, "menu": self.help_command,
+                   "pomoc": self.help_command, "guide": self.guide_command, "przewodnik": self.guide_command,
+                   "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
                    "dolicz": self.extend_command, "panel": self.panel_command, "funnel": self.funnel_command,
@@ -347,6 +357,39 @@ class Bot:
 
     def help_command(self, rest):
         self.say(RECIPES[rest].usage() if rest in RECIPES else HELP)
+
+    def start_command(self, _rest=""):
+        rows = [[("📖 Przewodnik", "g:"), ("▶️ Wypróbuj: krótka dynamika", "t:md")]]
+        if self.web_url:
+            rows.append([("🧾 Panel", self.web_url)])
+        self.say("🧪 <b>Kolejka obliczeń</b> na laptopie.\nWyślij plik albo komendę, ustaw kartę, naciśnij Start – "
+                 "wyniki wrócą tutaj. Zacznij od przewodnika albo od gotowego przykładu. Ściąga komend: /help",
+                 keyboard(rows))
+
+    def guide_view(self, topic_id=""):
+        """(text, markup) of one topic, or of the list of topics."""
+        topic = guide.BY_ID.get(topic_id)
+        if topic is None:
+            buttons = [(t.title, f"g:{t.id}") for t in guide.TOPICS]
+            rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+            return "📖 <b>Przewodnik</b> – wybierz temat:", keyboard(rows)
+        rows = []
+        if topic.example:
+            rows.append([("▶️ Wypróbuj na przykładzie", f"t:{topic.example}")])
+        if topic.recipe:
+            rows.append([("⚙️ Wszystkie ustawienia", f"h:{topic.recipe}")])
+        rows.append([("↩️ Tematy", "g:")])
+        return f"<b>{topic.title}</b>\n\n{topic.text}", keyboard(rows)
+
+    def guide_command(self, rest=""):
+        self.say(*self.guide_view(rest.strip().lower()))
+
+    def try_example(self, name):
+        example = examples.EXAMPLES.get(name)
+        if example is None:
+            return self.say("Nie ma takiego przykładu.")
+        self.say(f"🧪 {esc(example.note)}")
+        self.open_draft(example.recipe, example.name, dict(example.typed), example.files())
 
     def recipe_command(self, word, text, rest):
         recipe = RECIPES[word]
@@ -594,11 +637,28 @@ class Bot:
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
+        changed |= self.check_for_update(now)
         for token in list(self.state["drafts"]):
             if (self.store.root / "staging" / token / actions.CLOSED).exists():
                 self.drop(token)  # started from the Mini App
         if changed:
             self.save()
+
+    def check_for_update(self, now):
+        """Once a day: tell about a new release once, with a button that installs it."""
+        if self.updater is None or now - self.state.get("update_checked", 0) < 86400:
+            return False
+        self.state["update_checked"] = now
+        from .updater import UpdateError, version_tuple
+        try:
+            tag = self.updater.latest()
+        except UpdateError:
+            return True
+        if version_tuple(tag[1:]) > version_tuple(VERSION) and self.state.get("update_told") != tag:
+            self.state["update_told"] = tag
+            self.say(f"⬆️ Jest nowa wersja {esc(tag)} (masz {VERSION}). Trwające zadanie nie ucierpi: runner "
+                     "przełączy się po jego końcu.", keyboard([[("⬆️ Zainstaluj", "u:install")]]))
+        return True
 
     def runner_alive(self, beat):
         return bool(beat) and self.clock() - beat.get("time", 0) < 180
@@ -748,7 +808,8 @@ def run(api, bot):
             {"command": "jobs", "description": "Kolejka zadań"},
             {"command": "system", "description": "Temperatura, RAM, dysk"},
             {"command": "panel", "description": "Panel (Mini App)"},
-            {"command": "help", "description": "Co umiem"}])})
+            {"command": "guide", "description": "Przewodnik i przykłady"},
+            {"command": "help", "description": "Ściąga komend"}])})
     except TelegramError as e:
         log(f"start: {e}")
     offset, failures = None, 0
