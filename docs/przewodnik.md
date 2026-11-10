@@ -34,7 +34,7 @@ Plik `.pdb` albo kod: `/md 1E0L`. Bot sam czyści strukturę (jeden model, bez w
 `ensemble=nvt` – **użyj przy wysokiej T**: w NPT przy 600 K i 1 bar woda odparowuje (gęstość spada z ~1000 do kilkudziesięciu kg/m³) i wynik nie ma sensu.  
 
 **Ile to trwa**  
-Małe białko w wodzie (~13 tys. atomów) to na tym laptopie rząd kilku ns na dobę – dokładną liczbę i godzinę końca bot pokaże po pierwszych minutach produkcji. 0,5 ns to kilka godzin, 10 ns kilka dni.  
+Zmierzone na tym laptopie: ~50 ns na dobę dla 6 tys. atomów (Trp-cage w wodzie). Czas rośnie mniej więcej z liczbą atomów, więc ~13 tys. atomów (np. 1E0L) to około 20–25 ns na dobę: 0,5 ns w pół godziny, 10 ns w pół doby. Dokładną godzinę końca bot pokaże po pierwszych minutach produkcji.  
 
 **Jak czytać wynik**  
 • *Temperatura i gęstość*: mają falować wokół zadanej T i ~1000 kg/m³. Dryf = układ nie jest zrównoważony.  
