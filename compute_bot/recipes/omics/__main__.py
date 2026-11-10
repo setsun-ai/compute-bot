@@ -29,7 +29,8 @@ def run(work):
     params = load_params(work)
     threads = max(1, int(_threads))
     pipeline.progress("wczytywanie danych")
-    datasets = parse.load_datasets(work, group_col=params["group"], layer=params["layer"])
+    datasets = parse.load_datasets(work, group_col=params["group"], layer=params["layer"],
+                                   pair_col=params.get("pair", ""))
     for ds in datasets:
         pipeline.validate(ds, params)
     root = work / "wyniki"

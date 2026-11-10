@@ -232,3 +232,168 @@ def boxplots(L, groups, top, labels, path):
         ax.axis("off")
     _save(fig, path)
 
+
+
+# ---------------------------------------------------------------- lipidomics / untargeted LC-MS
+
+def _categories(cats, index, top=9):
+    """Category per point with the rare ones folded into 'inne' and the unlabelled ones last ('bez nazwy')."""
+    c = cats.reindex(index).astype(object)
+    c = c.where(c.notna(), "bez nazwy")
+    counts = c[c != "bez nazwy"].value_counts()
+    keep = list(counts.index[:top])
+    c = c.where(c.isin(keep + ["bez nazwy"]), "inne")
+    order = keep + [k for k in ("inne", "bez nazwy") if (c == k).any()]
+    return c, order
+
+
+def _scatter_by_category(ax, x, y, cats, mark=None):
+    if cats is None:
+        ax.scatter(x, y, s=8, c="tab:blue", alpha=0.6, linewidths=0)
+    else:
+        c, order = _categories(cats, x.index)
+        for i, k in enumerate(order):
+            idx = c.index[c == k]
+            color = "0.75" if k in ("bez nazwy", "nieistotne") else "0.45" if k == "inne" else plt.cm.tab10(i % 10)
+            ax.scatter(x[idx], y[idx], s=10, color=color, alpha=0.8, linewidths=0, label=f"{k} ({len(idx)})",
+                       zorder=1 if k in ("bez nazwy", "nieistotne") else 2)
+        ax.legend(fontsize=7, loc="best", ncol=2 if len(order) > 6 else 1)
+    if mark is not None and len(mark):
+        idx = [f for f in mark if f in x.index]
+        ax.scatter(x[idx], y[idx], s=34, facecolors="none", edgecolors="k", linewidths=0.8, zorder=3,
+                   label="istotne")
+
+
+def rt_mz(rt, mz, cats, path, mark=None, mass_label="m/z", title="RT vs m/z"):
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    ok = rt.notna() & mz.notna()
+    _scatter_by_category(ax, rt[ok], mz[ok], cats, mark)
+    ax.set_xlabel("czas retencji [min]")
+    ax.set_ylabel(mass_label)
+    ax.set_title(title + (" (obwódka = istotne)" if mark is not None and len(mark) else ""), fontsize=10)
+    _save(fig, path)
+
+
+def kendrick(nominal, kmd, cats, path, mark=None):
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    _scatter_by_category(ax, nominal, kmd, cats, mark)
+    ax.set_xlabel("nominalna masa Kendricka (baza CH₂)")
+    ax.set_ylabel("defekt masy Kendricka (KMD)")
+    ax.set_title("Wykres Kendricka: szeregi homologiczne (+CH₂) leżą na poziomych liniach", fontsize=10)
+    _save(fig, path)
+
+
+def van_krevelen(vk, cats, path, mark=None):
+    fig, ax = plt.subplots(figsize=(7, 5.5))
+    _scatter_by_category(ax, vk["O_C"], vk["H_C"], cats, mark)
+    ax.set_xlabel("O/C")
+    ax.set_ylabel("H/C")
+    ax.set_title(f"Diagram Van Krevelena ({len(vk)} cech ze wzorem sumarycznym)", fontsize=10)
+    _save(fig, path)
+
+
+def venn(counts, groups, path, title="Cechy obecne w grupach"):
+    """Two or three circles with the number of features in every region."""
+    from matplotlib.patches import Circle
+    fig, ax = plt.subplots(figsize=(6, 5.2))
+    n = len(groups)
+    centres = [(-0.5, 0.0), (0.5, 0.0)] if n == 2 else [(-0.5, 0.3), (0.5, 0.3), (0.0, -0.55)]
+    for i, (g, (cx, cy)) in enumerate(zip(groups, centres, strict=True)):
+        ax.add_patch(Circle((cx, cy), 0.9, color=plt.cm.tab10(i), alpha=0.3))
+        total = sum(v for k, v in counts.items() if g in k)
+        lx, ly = (cx * 2.6, cy + 0.95) if n == 2 or i < 2 else (cx, cy - 1.05)
+        ax.text(lx, ly, f"{_short(g, 16)}\n(n={total})", ha="center", va="center", fontsize=10)
+    from itertools import combinations
+    regions = [k for r in range(1, n + 1) for k in combinations(groups, r)]
+    for key in regions:
+        v = counts.get(key, 0)
+        pts = np.array([centres[groups.index(g)] for g in key])
+        x, y = pts.mean(axis=0)
+        if len(key) == 1:
+            x, y = x * 1.7, (y * 1.5 if n == 3 else y)
+        elif n == 3 and len(key) == 2:
+            x, y = x * 1.5, y * 1.5 + (0.12 if y > 0 else 0)
+        ax.text(x, y, str(v), ha="center", va="center", fontsize=12, fontweight="bold")
+    ax.set_xlim(-2.2, 2.2)
+    ax.set_ylim(-1.9, 1.6)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(title, fontsize=10)
+    _save(fig, path)
+
+
+def is_drift(istd, samples, path, max_panels=8):
+    """Signal of every internal standard along the injection order (log2), coloured by sample type."""
+    s = samples.loc[[c for c in istd.columns if c in samples.index]]
+    rows = list(istd.index[:max_panels])
+    cols = min(2, len(rows))
+    nr = int(np.ceil(len(rows) / cols))
+    fig, axes = plt.subplots(nr, cols, figsize=(6.5 * cols, 2.6 * nr), squeeze=False, sharex=True)
+    for ax, name in zip(axes.flat, rows, strict=False):
+        y = np.log2(istd.loc[name, s.index].astype(float))
+        for t, (c, m) in TYPE_STYLE.items():
+            idx = s.index[s._type == t]
+            if len(idx):
+                ax.scatter(s.loc[idx, "_order"], y[idx], c=c, marker=m, s=14, label=TYPE_PL[t])
+        study = s.index[s._type.isin(["sample", "qc", "replicate"])]
+        lin = istd.loc[name, study].astype(float)
+        rsd = lin.std() / lin.mean() if lin.notna().sum() > 2 else np.nan
+        ax.axhline(y[study].median(), ls=":", c="k", lw=0.6)
+        _batch_lines(ax, s)
+        ax.set_title(f"{_short(name, 40)} – RSD {rsd:.0%}", fontsize=8)
+        ax.set_ylabel("log2", fontsize=8)
+    for ax in list(axes.flat)[len(rows):]:
+        ax.axis("off")
+    axes.flat[0].legend(fontsize=6, ncol=3)
+    for ax in axes[-1]:
+        ax.set_xlabel("kolejność iniekcji")
+    fig.suptitle("Dryf wzorców wewnętrznych w kolejności iniekcji", fontsize=10)
+    _save(fig, path)
+
+
+def class_composition(shares, table, path, fdr=0.05, what="klas lipidów"):
+    """Stacked bars of the mean signal share per group and, when tested, the log2 fold change of each class."""
+    has_fc = table is not None and "log2FC" in table and table["log2FC"].notna().any()
+    fig, axes = plt.subplots(1, 2 if has_fc else 1, figsize=(11 if has_fc else 6, 5), squeeze=False)
+    ax = axes[0, 0]
+    order = shares.mean(axis=1).sort_values(ascending=False).index
+    bottom = np.zeros(shares.shape[1])
+    for i, k in enumerate(order):
+        v = shares.loc[k].to_numpy(float) * 100
+        ax.bar([_short(g, 14) for g in shares.columns], v, bottom=bottom, color=plt.cm.tab20(i % 20), label=k)
+        for j, h in enumerate(v):
+            if h >= 6:
+                ax.text(j, bottom[j] + h / 2, f"{h:.0f}%", ha="center", va="center", fontsize=7)
+        bottom += np.nan_to_num(v)
+    ax.set_ylabel("udział w sumie sygnału lipidów [%]")
+    ax.set_title(f"Skład {what} w grupach (średnia)", fontsize=10)
+    ax.legend(fontsize=7, bbox_to_anchor=(1.01, 1), loc="upper left")
+    if has_fc:
+        ax = axes[0, 1]
+        t = table.loc[[k for k in order if k in table.index]].iloc[::-1]
+        q = t["q"] if "q" in t else None
+        colors = ["tab:red" if (q is not None and q[k] < fdr and t.loc[k, "log2FC"] > 0) else
+                  "tab:blue" if (q is not None and q[k] < fdr) else "0.7" for k in t.index]
+        ax.barh(list(t.index), t["log2FC"], color=colors)
+        ax.axvline(0, c="k", lw=0.6)
+        ax.set_xlabel("log2FC sumy klasy")
+        ax.set_title(f"Zmiana sumy sygnału klasy (kolor = q < {fdr:g})", fontsize=10)
+    _save(fig, path)
+
+
+def lipid_distributions(dist, path):
+    """Chain length and double bonds of the significantly changed lipids against all measured ones."""
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    for ax, (key, title) in zip(axes, (("dlugosc_lancuchow", "łączna długość łańcuchów (C)"),
+                                       ("wiazania_podwojne", "wiązania podwójne")), strict=True):
+        d = dist[dist.cecha == key]
+        x = np.arange(len(d))
+        ax.bar(x, d["wszystkie"], color="0.85", label="wszystkie lipidy")
+        ax.bar(x - 0.2, d["w_gore"], width=0.4, color="tab:red", label="istotnie wyższe")
+        ax.bar(x + 0.2, d["w_dol"], width=0.4, color="tab:blue", label="istotnie niższe")
+        ax.set_xticks(x, d["wartosc"].astype(int), fontsize=7, rotation=90 if len(d) > 15 else 0)
+        ax.set_xlabel(title)
+        ax.set_ylabel("liczba lipidów")
+    axes[0].legend(fontsize=7)
+    fig.suptitle("Rozkład długości łańcuchów i nasycenia istotnych lipidów", fontsize=10)
+    _save(fig, path)

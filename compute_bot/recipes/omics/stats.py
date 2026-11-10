@@ -9,6 +9,7 @@ import pandas as pd
 from scipy import stats as ss
 
 TWO_GROUP = ("ttest", "welch", "mwu")
+PAIRED = ("paired_t", "wilcoxon")
 
 
 def bh(p):
@@ -133,17 +134,84 @@ def _ols_statsmodels(y, D, gcols):
     return coef, pv, pf
 
 
-def feature_tests(L, groups, ref, test="auto", covariates=None):
+def complete_pairs(groups, pairs, levels):
+    """Pair id -> (sample in levels[0], sample in levels[1]) for pairs with both members, and the ids of the
+    incomplete ones (a member missing, or more than one sample of a pair in a group)."""
+    p = pairs.reindex(groups.index)
+    sides = []
+    for g in levels:
+        side = {}
+        for c in groups.index[(groups == g) & p.notna()]:
+            side.setdefault(p[c], []).append(c)
+        sides.append(side)
+    ids = sorted(set(sides[0]) | set(sides[1]), key=str)
+    full = {k: (sides[0][k][0], sides[1][k][0]) for k in ids
+            if len(sides[0].get(k, [])) == 1 and len(sides[1].get(k, [])) == 1}
+    return full, [k for k in ids if k not in full]
+
+
+def _paired_tests(L, groups, pairs, levels, test):
+    """Paired t-test or Wilcoxon signed-rank on the within-pair differences (levels[1] - levels[0])."""
+    full, dropped = complete_pairs(groups, pairs, levels)
+    if len(full) < 2:
+        raise ValueError("need at least two complete pairs")
+    A = L[[a for a, _ in full.values()]].to_numpy(float)
+    B = L[[b for _, b in full.values()]].to_numpy(float)
+    D = B - A
+    res = pd.DataFrame(index=L.index)
+    with np.errstate(invalid="ignore"):
+        for g, M in zip(levels, (A, B), strict=True):
+            res[f"mean_{g}"] = np.nanmean(np.where(np.isfinite(D), M, np.nan), axis=1)
+            res[f"n_{g}"] = np.isfinite(D).sum(axis=1)
+        res["log2FC"] = np.nanmean(D, axis=1)
+        if test == "paired_t":
+            p = _filled(ss.ttest_rel(B, A, axis=1, nan_policy="omit").pvalue)
+        else:
+            p = np.full(len(L), np.nan)
+            ok = (np.isfinite(D) & (D != 0)).sum(axis=1) >= 1
+            if ok.any():
+                p[ok] = _filled(ss.wilcoxon(D[ok], axis=1, nan_policy="omit").pvalue)
+    res["p"] = p
+    res.attrs.update(n_pairs=len(full), dropped_pairs=len(dropped), dropped=[str(k) for k in dropped],
+                     n_used=2 * len(full), pair_samples=[c for ab in full.values() for c in ab])
+    return res
+
+
+def collapse_replicates(L, units, groups):
+    """Mean (on the log scale) of the injections of one biological sample. `units`: injection -> unit label.
+    Returns (features x units, group per unit, info with n_injections / n_units / sizes)."""
+    units = units.reindex(L.columns).dropna()
+    order = list(dict.fromkeys(units))
+    Lu = L[units.index].T.groupby(units.to_numpy(), sort=False).mean().T[order]
+    gu = pd.Series({u: groups.reindex(units.index[units == u]).dropna().iloc[0]
+                    if groups.reindex(units.index[units == u]).notna().any() else None for u in order})
+    sizes = units.value_counts().reindex(order)
+    return Lu, gu, {"n_injections": int(len(units)), "n_units": len(order), "sizes": sizes}
+
+
+def feature_tests(L, groups, ref, test="auto", covariates=None, pairs=None):
     """One test per feature: log2 fold change vs `ref`, p, BH q (attrs['test'] = test used).
 
-    auto: lm when covariates are given, Welch t-test for 2 groups, one-way ANOVA for more. With > 2 groups the
-    omnibus p (ANOVA / Kruskal-Wallis / F-test of the group terms) is the main p; pairwise p_<g>/q_<g> vs ref
-    use Welch (or Mann-Whitney / model coefficients).
+    auto: paired t-test when `pairs` (sample -> subject) are given, lm when covariates are given, Welch t-test for
+    2 groups, one-way ANOVA for more. With > 2 groups the omnibus p (ANOVA / Kruskal-Wallis / F-test of the group
+    terms) is the main p; pairwise p_<g>/q_<g> vs ref use Welch (or Mann-Whitney / model coefficients).
+    Paired tests (paired_t, wilcoxon) need two groups; pairs without both members are left out (attrs n_pairs,
+    dropped_pairs).
     """
     groups = groups.dropna().astype(str)
     levels = [ref] + sorted(g for g in groups.unique() if g != ref)
     if len(levels) < 2:
         raise ValueError("need two groups")
+    if test == "auto" and pairs is not None and len(levels) == 2:
+        test = "paired_t"
+    if test in PAIRED:
+        if pairs is None or len(levels) != 2:
+            raise ValueError("paired tests need pairs and exactly two groups")
+        res = _paired_tests(L, groups, pairs, levels, test)
+        res["q"] = bh(res["p"])
+        res.attrs["test"] = test
+        res.attrs["levels"] = levels
+        return res
     if test == "auto":
         test = "lm" if covariates is not None and len(covariates.columns) else ("welch" if len(levels) == 2
                                                                                  else "anova")

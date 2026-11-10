@@ -7,6 +7,7 @@ Conventions: `X` = linear intensities, `L` = log2 intensities, both features x s
 """
 from __future__ import annotations
 
+import re
 import warnings
 
 import numpy as np
@@ -64,11 +65,6 @@ def audit(X, samples, features=None, istd=None):
         no_group = s.loc[st, "_group"].isna().sum() if "_group" in s else len(st)
         if no_group:
             warn.append(f"{int(no_group)} próbek bez grupy (pominięte w statystyce)")
-        if "_subject" in s and s.loc[st, "_subject"].notna().any():
-            d = s.loc[st, "_subject"].dropna().duplicated().sum()
-            if d:
-                warn.append(f"{int(d)} osób ma więcej niż jedną próbkę typu sample – w statystyce liczy się "
-                            "pierwsza poprawna (unikamy pseudoreplikacji)")
     order = s._order
     if order.duplicated().any():
         warn.append("powtórzone numery kolejności iniekcji")
@@ -369,13 +365,16 @@ def batch_correct(L, samples, mask, mode="auto"):
         why = "wyłączona (batch=none)" if mode == "none" else "jedna partia"
         return L.copy(), {"method": "none", "notes": [f"korekta partii: {why}"]}
     M = L.where(mask)
+    notes = []
+    if "?" in batches and len(batches) > 2:     # injections with no batch in the sheet cannot be aligned
+        batches = [b for b in batches if b != "?"]
+        notes.append(f"{int((s._batch == '?').sum())} iniekcji bez partii – zostawione bez korekty partii")
     qc_n = s[s._type == "qc"].groupby("_batch").size().reindex(batches, fill_value=0)
     method = "qc" if (qc_n >= 2).all() else "samples"
     kind = "qc" if method == "qc" else "sample"
     ref_all = [c for c in L.columns if s.loc[c, "_type"] == kind]
     target = M[ref_all].median(axis=1)
     C = L.copy()
-    notes = []
     for b in batches:
         cols = list(s.index[s._batch == b])
         ref = [c for c in cols if s.loc[c, "_type"] == kind]
@@ -433,6 +432,88 @@ def replicate_delta(L, samples):
     if not pairs:
         return None
     return float(np.median([(L[a] - L[b]).abs().median() for a, b in pairs]))
+
+
+def qc_presence_filter(X, samples, na_max=0.5, min_qc=3):
+    """Keep a feature detected in at least (1 - na_max) of the pooled QCs: what the QC does not show cannot be
+    checked for repeatability. Skipped (all kept) with fewer than `min_qc` QCs."""
+    s = samples.loc[X.columns]
+    qcs = list(s.index[s._type == "qc"])
+    if len(qcs) < min_qc:
+        return pd.Series(True, index=X.index), None
+    frac = X[qcs].isna().mean(axis=1)
+    return frac <= na_max, frac
+
+
+REPLICATE_NAME = [re.compile(r"(?i)^(.*?)[\s_\-.]*(?:replicate|repl|rep|tech|inj|r)[\s_\-]?\d+$"),
+                  re.compile(r"^(.*\d)[A-Za-z]$")]
+RUN_NUMBER = re.compile(r"^(.+\d[A-Za-z])[\s_]+\d{2,}$")
+
+
+def _replicate_stem(name):
+    """'K_1A' -> 'K_1', 'A0_r2' -> 'A0', 'DA 12_1B 1207' -> 'DA 12_1'; None when the name marks no replicate
+    (a bare '_1' / '_2' is a sample number, not a replicate)."""
+    text = str(name).strip()
+    m = RUN_NUMBER.match(text)
+    if m:
+        text = m.group(1)
+    for pattern in REPLICATE_NAME:
+        m = pattern.match(text)
+        if m and m.group(1):
+            return m.group(1)
+    return None
+
+
+def replicate_units(samples, cols):
+    """Injection -> biological sample it belongs to. The same subject (`_pair`, else `_subject`) in the same group
+    is one unit; without subjects the replicate mark in the name decides (1A/1B, _rep2). A unit with one injection
+    keeps the injection's name."""
+    s = samples.loc[cols]
+    subj = None
+    for c in ("_pair", "_subject"):
+        if c in s and s[c].notna().any():
+            subj = s[c]
+            break
+    group = s["_group"] if "_group" in s else pd.Series(None, index=s.index)
+    keys = {}
+    for c in cols:
+        g = group[c] if pd.notna(group[c]) else ""
+        if subj is not None and pd.notna(subj[c]):
+            keys[c] = (str(subj[c]), str(g))
+        else:
+            stem = _replicate_stem(c) if subj is None else None
+            keys[c] = (stem, str(g)) if stem else (c, None)
+    members = {}
+    for c, k in keys.items():
+        members.setdefault(k, []).append(c)
+    labels = {}
+    for k, cs in members.items():
+        label = cs[0] if len(cs) == 1 else " ".join(x for x in k if x)
+        for c in cs:
+            labels[c] = label
+    return pd.Series(labels).reindex(cols)
+
+
+def spare_whole_samples(samples, flags):
+    """Un-reject injections when every replicate of a biological sample (>= 2 injections) is flagged the same way
+    for missing values or total signal: that is how the sample is, not a failed injection. A flag from the internal
+    standards stays. Returns the spared unit labels; `flags` is changed in place."""
+    cols = [c for c in flags.index if samples.loc[c, "_type"] == "sample"]
+    if not cols:
+        return []
+    units = replicate_units(samples, cols)
+    spared = []
+    for u, members in units.groupby(units).groups.items():
+        members = list(members)
+        if len(members) < 2 or not flags.loc[members, "rejected"].all():
+            continue
+        if flags.loc[members, "reason"].str.contains("IS").all():
+            continue
+        keep = [c for c in members if "IS" not in flags.loc[c, "reason"]]
+        flags.loc[keep, "rejected"] = False
+        flags.loc[keep, "reason"] = "zostawiona (odstaje cała próbka): " + flags.loc[keep, "reason"]
+        spared.append(str(u))
+    return spared
 
 
 def cluster_representatives(L, features):
