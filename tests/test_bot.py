@@ -534,11 +534,11 @@ def big_job(store, size=60 * 1024 ** 2):
 
 def test_with_the_panel_a_big_file_gets_a_download_link_and_scp(panel):
     bot, api, store, _ = panel
-    bot.ssh_target = "nekki@serwer.example.ts.net"
+    bot.ssh_target = "student@laptop.example.ts.net"
     job = big_job(store)
     bot.tick()
     text = next(t for t in api.texts() if "traj.xtc" in t)
-    assert "scp nekki@serwer.example.ts.net:" in text and f"jobs/{job:04d}/work/traj.xtc" in text
+    assert "scp student@laptop.example.ts.net:" in text and f"jobs/{job:04d}/work/traj.xtc" in text
     link = next(b["url"] for b in last_buttons(api) if "url" in b)
     assert link.startswith("https://vostro.example.ts.net/dl/")
     from compute_bot import links
