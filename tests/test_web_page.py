@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from compute_bot import jobs, web
+from compute_bot import guide, jobs, links, web
 from compute_bot.recipes import ParamError
 
 PAGE = web.PAGE.read_text(encoding="utf-8")
@@ -101,7 +101,7 @@ def web_route_words():
 def test_every_path_word_the_page_uses_is_in_web_py_routing():
     words = web_route_words()
     assert {"state", "recipes", "drafts", "jobs", "log", "file", "hold", "cleanup", "discard",
-            "cancel", "top", "retry", "send", "extend", "remove"} <= words
+            "cancel", "top", "retry", "send", "extend", "remove", "guide", "examples", "draft", "link"} <= words
     for _, path in page_calls():
         static = [p for p in path.split("?")[0].strip("/").split("/")[1:] if "${" not in p]
         missing = [p for p in static if p not in words and p != "start"]  # drafts/TOKEN/<anything> starts the card
@@ -123,7 +123,8 @@ def app(tmp_path):
 
 
 def concrete(path):
-    """A page path with its ${…} parts filled: job 1, card 777, file a.txt, log 100 bytes."""
+    """A page path with its ${…} parts filled: job 1, card 777, example md, file a.txt, log 100 bytes."""
+    path = re.sub(r"/examples/\$\{[^}]+\}", "/examples/md", path)
     path = re.sub(r"/jobs/\$\{[^}]+\}", "/jobs/1", path)
     path = re.sub(r"/drafts/\$\{[^}]+\}", "/drafts/777", path)
     path = re.sub(r"path=\$\{[^}]+\}", "path=a.txt", path)
@@ -140,7 +141,8 @@ def test_every_api_call_of_the_page_is_routed_by_the_app(app):
         ("GET", "/api/jobs/1/log"), ("GET", "/api/jobs/1/file"), ("POST", "/api/hold"), ("POST", "/api/jobs/1/cancel"),
         ("POST", "/api/jobs/1/top"), ("POST", "/api/jobs/1/retry"), ("POST", "/api/jobs/1/send"),
         ("POST", "/api/jobs/1/extend"), ("POST", "/api/drafts/777/start"), ("POST", "/api/drafts/777/discard"),
-        ("POST", "/api/jobs/1/remove"), ("POST", "/api/cleanup")}
+        ("POST", "/api/jobs/1/remove"), ("POST", "/api/cleanup"), ("GET", "/api/guide"),
+        ("POST", "/api/examples/md/draft"), ("POST", "/api/jobs/1/link")}
     # removing job 1 last, so the other job routes still find it
     for method, path in sorted(calls, key=lambda c: c[1].endswith("/remove")):
         url, query = concrete(path)
@@ -153,3 +155,38 @@ def test_every_api_call_of_the_page_is_routed_by_the_app(app):
             pytest.fail(f"{method} {url} is not routed by web.App")
         except (ParamError, FileExistsError):
             pass  # routed; refused for this job's state, which is the page's business to show
+
+
+def test_guide_example_and_link_answers_have_the_shape_the_page_reads(app):
+    topics = app.get("/api/guide", {})
+    assert {"id", "title", "text", "recipe", "example"} <= set(topics[0])
+    ids = {t["id"] for t in topics}
+    assert {"start", "problemy"} <= ids  # the empty-queue card and the failed-job link open these by id
+    # "Jak czytać wynik?" and the form's "?" look a topic up by recipe: every recipe the page lists has one
+    listed = re.search(r"READ_RESULT = \[([^\]]+)\]", PAGE)[1]
+    assert {r.strip(" '") for r in listed.split(",")} <= {t["recipe"] for t in topics}
+    token = app.post("/api/examples/md/draft", {})["token"]
+    assert app.drafts()[token]["recipe"] == "md"  # what the page opens the parameter form with
+    url = app.post("/api/jobs/1/link", {"path": "a.txt"})["url"]
+    assert url.startswith("/dl/") and links.parse("1:a", url[len("/dl/"):], app.clock()) == (1, "a.txt")
+    with pytest.raises(LookupError):
+        app.post("/api/examples/nope/draft", {})
+
+
+def test_guide_text_needs_only_the_tags_the_page_lets_through():
+    allowed = re.search(r"const G_TAG = /<\\/\?\(\?:([a-z|]+)\)>/g", PAGE)
+    assert allowed and set(allowed[1].split("|")) == {"b", "i", "code", "pre"}
+    for topic in guide.TOPICS:
+        rest = guide.TAG.sub("", topic.text)
+        assert "<" not in rest and ">" not in rest, topic.id
+        assert not re.search(r"&(?!(?:lt|gt|amp);)", rest), topic.id
+    # topic text reaches innerHTML only through the sanitiser
+    assert len(re.findall(r"\bt\.text\b", PAGE)) == PAGE.count("guideHtml(t.text)") > 0
+
+
+def test_big_files_get_a_download_link_instead_of_a_dead_end():
+    assert "za duży" not in PAGE
+    for text in ("⬇️ Pobierz", "📤 Wyślij na czat", "ważny 24 h; działa na urządzeniu z Tailscale albo po",
+                 "tg.openLink(", "location.origin + r.url", "📖 Przewodnik", "Zacznij tutaj", "Co poszło nie tak?",
+                 "Jak czytać wynik?", "▶️ Wypróbuj na przykładzie", "skopiowano"):
+        assert text in PAGE, text

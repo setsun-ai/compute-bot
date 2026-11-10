@@ -137,6 +137,9 @@ class App:
         example = examples.EXAMPLES.get(name)
         if example is None:
             raise LookupError
+        for token, draft in self.drafts().items():  # a second tap opens the card that is already waiting
+            if draft.get("name") == example.name and (self.store.root / "staging" / token / "draft.json").exists():
+                return {"token": token}
         token = str(int(self.clock() * 1000))
         folder = self.store.root / "staging" / token
         folder.mkdir(parents=True)

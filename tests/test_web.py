@@ -251,3 +251,12 @@ def test_guide_is_served(server):
     _, base, _ = server
     code, topics = call(base, "/api/guide")
     assert code == 200 and {"start", "md", "wyniki"} <= {t["id"] for t in topics}
+
+
+def test_tapping_an_example_twice_gives_the_same_card(server):
+    _, base, _ = server
+    first = call(base, "/api/examples/qsar/draft", {})[1]["token"]
+    assert call(base, "/api/examples/qsar/draft", {})[1]["token"] == first
+    assert len(call(base, "/api/drafts")[1]) == 1
+    call(base, f"/api/drafts/{first}/discard", {})
+    assert call(base, "/api/examples/qsar/draft", {})[1]["token"] != first
