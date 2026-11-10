@@ -125,7 +125,10 @@ RECIPES = {r.name: r for r in (
             "ensemble": Param("choice", "npt", "produkcja w NPT czy NVT (NVT lepsze do rozwijania w wysokiej T)",
                               ("npt", "nvt")),
             "engine": Param("choice", "gromacs", "silnik", ("gromacs", "openmm")),
-            "mdp": Param("str", "", "zmienione opcje produkcji, np. nstxout-compressed=500;tcoupl=nose-hoover"),
+            "mdp": Param("str", "", "opcje GROMACS: produkcja np. nstxout-compressed=500, inny etap z przedrostkiem: "
+                                    "nvt:ref_t=310 310;npt:tau_p=5;em:emtol=500"),
+            "T_eq": Param("float", 0.0, "temperatura równowagowania NVT/NPT [K] (0 = 300 K, albo T gdy niższa)",
+                          low=0, high=1000),
             "extend_ns": Param("float", 0.0, "dolicz tyle ns do skończonej produkcji (ustawia /dolicz)",
                                low=0, high=1000),
         },

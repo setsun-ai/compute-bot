@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -832,3 +833,214 @@ def test_openmm_end_to_end_1l2y_kill_resume_extend(tmp_path):
     assert "Przedłużenie" in (child / "summary.txt").read_text()
     print(f"\ntiming: killed run {t_first:.0f} s, resumed run + analysis {t_second:.0f} s, "
           f"extension + analysis {t_ext:.0f} s")
+
+
+# --- T_eq, stage-prefixed mdp ---------------------------------------------------------------------------------------
+
+def test_equilibration_temperature_option():
+    for engine in ("gromacs", "openmm"):
+        p = params(T=600, T_eq=320, engine=engine)
+        assert {s.name: s.temp for s in M.plan_stages(p)}.items() >= {"nvt": 320, "npt": 320, "md": 600}.items()
+    p = params(T=600, T_eq=320, seed=3)
+    mdps = {s.name: M.parse_mdp(M.make_mdp(s, p["ff"], p["seed"])) for s in M.plan_stages(p)}
+    assert mdps["nvt"]["ref_t"] == "320 320" and mdps["nvt"]["gen_temp"] == "320"
+    assert mdps["npt"]["ref_t"] == "320 320" and mdps["md"]["ref_t"] == "600 600"
+    # T_eq may also be below T or above 300 when T is low; 0 keeps the old rule
+    assert M.plan_stages(params(T=280, T_eq=250))[1].temp == 250
+    assert M.plan_stages(params(T=280))[1].temp == 280 and M.plan_stages(params(T=600))[1].temp == 300
+    assert M.plan_stages(params(T=600, T_eq=0))[2].temp == 300
+
+
+def test_stage_prefixed_overrides():
+    text = "nstxout-compressed=500;nvt:ref_t=310 310;npt:tau_p=5;em:emtol=500;md:dt=0.001;NPT:tau-p=4"
+    over = M.parse_stage_overrides(text)
+    assert over == {"md": [("nstxout-compressed", "500"), ("dt", "0.001")], "nvt": [("ref_t", "310 310")],
+                    "npt": [("tau_p", "5"), ("tau-p", "4")], "em": [("emtol", "500")]}
+    assert M.parse_overrides(text) == over["md"]  # no prefix = production, as before
+    assert M.parse_overrides(text, "em") == [("emtol", "500")]
+    with pytest.raises(G.RecipeError, match="em, nvt, npt, md") as exc:
+        M.parse_stage_overrides("nvt:tau_t=0.2 0.2;prod:dt=0.001")
+    assert "prod" in str(exc.value)
+    for bad in ("nvt:", "nvt:=1", ":dt=1", "nvt:a b=1"):
+        with pytest.raises(G.RecipeError, match="mdp"):
+            M.parse_stage_overrides(bad)
+    p = params(mdp=text, ns=0.01, nvt_ps=2)
+    plan = M.plan_stages(p)
+    texts = {s.name: M.parse_mdp(M.make_mdp(s, p["ff"], p["seed"], over.get(s.name))) for s in plan}
+    assert float(texts["em"]["emtol"]) == 500
+    assert texts["nvt"]["ref_t"] == "310 310" and texts["nvt"]["gen_temp"] == "310"
+    assert texts["npt"]["tau_p"] == "4" and "tau-p" not in texts["npt"]
+    assert texts["md"]["dt"] == "0.001" and texts["md"]["nstxout-compressed"] == "500"
+    nvt, md = plan[1], plan[3]
+    assert nvt.temp == 310 and plan[2].temp == 300
+    # a new time step keeps the stage's length in ps (unless nsteps is given too)
+    assert md.dt == 0.001 and md.nsteps == 10000 and md.ps == pytest.approx(10) and texts["md"]["nsteps"] == "10000"
+    md2 = M.plan_stages(params(mdp="md:dt=0.001;nsteps=777"))[-1]
+    assert md2.nsteps == 777
+    # ref_t in production beats T
+    md3 = M.plan_stages(params(T=350, mdp="ref_t=310 310"))[-1]
+    assert md3.temp == 310
+    with pytest.raises(G.RecipeError, match="liczby"):
+        M.plan_stages(params(mdp="md:dt=fast"))
+
+
+def test_check_params_stage_overrides():
+    from compute_bot.recipes.md import pipeline as P
+    with pytest.raises(G.RecipeError, match="mdp"):
+        P.check_params(params(engine="openmm", mdp="nvt:tau_t=0.2 0.2"))
+    with pytest.raises(G.RecipeError, match="dozwolone"):
+        P.check_params(params(mdp="eq:tau_t=0.2 0.2"))
+    notes = P.check_params(params(extend_ns=1, mdp="npt:tau_p=5"))
+    assert any("pominięte" in n for n in notes)
+    notes = P.check_params(params(nvt_ps=0, mdp="nvt:tau_t=0.2 0.2;npt:tau_p=5"))
+    assert any("nvt_ps=0" in n for n in notes) and not any("npt_ps" in n for n in notes)
+
+
+def test_summary_lists_overrides_per_stage():
+    from compute_bot.recipes.md import analysis as A
+    p = params(T=350, mdp="ref_t=310 310;nvt:tau_t=0.2 0.2;em:emtol=500")
+    lines = A.override_lines(M.parse_stage_overrides(p["mdp"]), M.plan_stages(p), p)
+    text = "\n".join(lines)
+    assert "minimalizacja: emtol=500" in text and "NVT: tau_t=0.2 0.2" in text and "produkcja: ref_t=310 310" in text
+    assert text.index("minimalizacja") < text.index("NVT") < text.index("produkcja")
+    assert "pierwszeństwo przed T=350 K" in text and "310 K" in text
+    assert A.override_lines({}, [], p) == []
+    assert "pierwszeństwo" not in "\n".join(A.override_lines({"nvt": [("ref_t", "310 310")]}, M.plan_stages(p), p))
+
+
+def test_actual_plan_reads_temperature_and_time_step_from_the_mdp(tmp_path):
+    from compute_bot.recipes.md import pipeline as P
+    p = params(T=300, ns=0.004, nvt_ps=2, npt_ps=2)
+    plan = M.plan_stages(p)
+    for s in plan:
+        (tmp_path / f"{s.name}.mdp").write_text(M.make_mdp(s, p["ff"], -1))
+    # files of the parent job win over params (here: written with other settings)
+    (tmp_path / "nvt.mdp").write_text("nsteps = 1000\ndt = 0.002\nref_t = 315 315\n")
+    (tmp_path / "md.mdp").write_text("nsteps = 4000\ndt = 0.001\nref_t = 330 330\n")
+    real = {s.name: s for s in P.actual_plan(tmp_path, M.plan_stages(p), "gromacs")}
+    assert real["nvt"].temp == 315 and real["nvt"].ps == pytest.approx(2)
+    assert real["md"].temp == 330 and real["md"].nsteps == 4000 and real["md"].ps == pytest.approx(4)
+    assert real["npt"].temp == 300
+
+
+# --- run.sh: the job as an editable script --------------------------------------------------------------------------
+
+def test_run_script_round_trip_and_inputs():
+    from compute_bot.recipes.md import export as E
+    plan = M.plan_stages(params())
+    stages = [(s.name, s.grompp) for s in plan]
+    text = E.run_script(stages, "1")
+    assert text.startswith("#!/bin/bash\n") and "ions.gro" in text.split("set -euo")[0]
+    assert "wyślij ten folder jako zip" in text
+    assert "MD_MAXWARN=1 md_step npt -f npt.mdp -c nvt.gro -r nvt.gro -t nvt.cpt -p topol.top\n" in text
+    assert E.parse_script(text) == stages
+    assert E.script_inputs(stages) == ["em.mdp", "ions.gro", "topol.top", "nvt.mdp", "npt.mdp", "md.mdp"]
+    short = [(s.name, s.grompp) for s in M.plan_stages(params(nvt_ps=0, npt_ps=0))]
+    assert E.script_inputs(short) == ["em.mdp", "ions.gro", "topol.top", "md.mdp"]
+
+
+def test_export_imports_without_numpy():
+    code = ("import sys\nfor m in ('numpy', 'MDAnalysis', 'gemmi', 'matplotlib'): sys.modules[m] = None\n"
+            "from compute_bot.recipes.md.export import script_files\nprint(script_files('.'))")
+    proc = subprocess.run([sys.executable, "-c", code], cwd=REPO, capture_output=True, text=True, timeout=60,
+                          env=dict(os.environ, PYTHONPATH=str(REPO)))
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "[]"
+
+
+def _gromacs_job_with_fake_gmx(tmp_path, p):
+    from compute_bot.recipes.md import pipeline as P
+    gdir = tmp_path / "gromacs"
+    gdir.mkdir()
+    (gdir / "clean.pdb").write_text("ATOM\n")
+    env = G.gmx_env(2)
+    plan = M.plan_stages(p)
+    P.build_system(gdir, p, env)
+    P.write_mdps(gdir, plan, p)
+    P.write_script(gdir, plan, env)
+    return gdir, plan, env
+
+
+def test_run_script_reproduces_the_recipe_calls(tmp_path, fake_gmx, monkeypatch):
+    from compute_bot.recipes.md import export as E
+    from compute_bot.recipes.md import pipeline as P
+    monkeypatch.setenv("MD_MAXWARN", "2")
+    p = params(nvt_ps=2, npt_ps=2, ns=0.004, mdp="npt:tau_p=5")
+    gdir, plan, env = _gromacs_job_with_fake_gmx(tmp_path, p)
+    built = len(_calls(fake_gmx))
+    P.run_stages(gdir, plan, env)
+    recipe_calls = _calls(fake_gmx)[built:]
+    assert [c.split()[0] for c in recipe_calls] == ["grompp", "mdrun"] * 4
+    assert "-maxwarn 2" in recipe_calls[0]
+    files = E.script_files(gdir)
+    assert files == ["em.mdp", "ions.gro", "md.mdp", "npt.mdp", "nvt.mdp", "posre.itp", "run.sh", "topol.top"]
+    fresh = tmp_path / "zip"
+    fresh.mkdir()
+    for name in files:
+        shutil.copy2(gdir / name, fresh / name)
+    fake_gmx.write_text("")
+    monkeypatch.delenv("MD_MAXWARN")  # the script carries the value itself
+    proc = subprocess.run(["bash", "run.sh"], cwd=fresh, capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert _calls(fake_gmx) == recipe_calls
+    # rerun (the bot's restart): every stage is skipped
+    fake_gmx.write_text("")
+    again = subprocess.run(["bash", "run.sh"], cwd=fresh, capture_output=True, text=True, timeout=120)
+    assert again.returncode == 0 and _calls(fake_gmx) == [] and "md już policzony" in again.stdout
+    # the script is rewritten identically on a rerun of the recipe (idempotent)
+    before = (gdir / "run.sh").read_text()
+    P.write_script(gdir, plan, dict(env, MD_MAXWARN="2"))
+    assert (gdir / "run.sh").read_text() == before
+
+
+def test_script_files_without_script(tmp_path):
+    from compute_bot.recipes.md import export as E
+    (tmp_path / "md.mdp").write_text("x")
+    assert E.script_files(tmp_path) == []
+
+
+@pytest.mark.slow
+def test_gromacs_run_script_1l2y_edited_and_rerun(tmp_path):
+    pytest.importorskip("gemmi")
+    from compute_bot.recipes.md import export as E
+    env = _recipe_env()
+    if not shutil.which("gmx", path=env["PATH"]):
+        pytest.skip("gmx not on PATH")
+    cmd = [sys.executable, "-m", "compute_bot.recipes.md"]
+    work = tmp_path / "work"
+    work.mkdir()
+    p = RECIPES["md"].validate({"pdb": "1L2Y", "nvt_ps": "2", "npt_ps": "2", "ns": "0.004", "seed": "9",
+                                "T_eq": "310", "mdp": "nvt:tau_t=0.2 0.2;npt:tau_p=4;md:nstcalcenergy=50"})
+    (work / "params.json").write_text(json.dumps(p))
+    t0 = time.time()
+    run = subprocess.run(cmd, cwd=work, env=env, capture_output=True, text=True, timeout=1800)
+    t_job = time.time() - t0
+    assert run.returncode == 0, run.stdout[-3000:] + run.stderr[-3000:]
+    gdir = work / "gromacs"
+    summary = (work / "summary.txt").read_text()
+    assert "NVT 2 ps (310 K" in summary and "NPT 2 ps (310 K" in summary and "w 300 K" in summary
+    assert "NVT: tau_t=0.2 0.2" in summary and "produkcja: nstcalcenergy=50" in summary
+    assert M.parse_mdp((gdir / "npt.mdp").read_text())["tau_p"] == "4"
+    files = E.script_files(gdir)
+    print("\nscript_files:", files)
+    assert {"run.sh", "ions.gro", "topol.top", "posre.itp", "em.mdp", "nvt.mdp", "npt.mdp", "md.mdp"} <= set(files)
+    assert not [f for f in files if f.endswith((".xtc", ".trr", ".cpt", ".edr", ".tpr", ".log"))]
+
+    fresh = tmp_path / "zip"
+    fresh.mkdir()
+    for name in files:
+        shutil.copy2(gdir / name, fresh / name)
+    md_mdp = (fresh / "md.mdp").read_text()
+    assert "nsteps" in md_mdp and "= 2000\n" in md_mdp
+    (fresh / "md.mdp").write_text(md_mdp.replace("= 2000\n", "= 1000\n", 1))
+    assert M.parse_mdp((fresh / "md.mdp").read_text())["nsteps"] == "1000"
+    t1 = time.time()
+    rerun = subprocess.run(["bash", "run.sh"], cwd=fresh, env=env, capture_output=True, text=True, timeout=1800)
+    t_script = time.time() - t1
+    assert rerun.returncode == 0, rerun.stdout[-3000:] + rerun.stderr[-3000:]
+    log = (fresh / "md.log").read_text()
+    assert "Finished mdrun" in log and re.search(r"^\s*nsteps\s*=\s*1000\s*$", log, re.M)
+    assert re.search(r"^\s*nsteps\s*=\s*2000\s*$", (gdir / "md.log").read_text(), re.M)
+    for stage in ("em", "nvt", "npt", "md"):
+        assert (fresh / f"{stage}.gro").exists()
+    print(f"timing: job {t_job:.0f} s, edited run.sh {t_script:.0f} s")

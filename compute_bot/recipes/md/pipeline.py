@@ -11,6 +11,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import export as E
 from . import extend as X
 from . import mdp as M
 from .gmxtools import (
@@ -44,15 +45,20 @@ def finished(gdir: Path, name: str) -> bool:
 def check_params(p: dict) -> list[str]:
     """Combinations the registry can't check; returns notes for the owner, raises RecipeError for the impossible."""
     notes = []
-    overrides = M.parse_overrides(p.get("mdp", ""))
+    overrides = M.parse_stage_overrides(p.get("mdp", ""))
     if p.get("engine", "gromacs") == "openmm":
         if overrides:
             raise RecipeError("mdp=… działa tylko z engine=gromacs (OpenMM nie czyta plików .mdp)")
         from .omm import openmm_forcefield
 
         notes += openmm_forcefield(p["ff"], p["water"])[2]
-    if p.get("extend_ns", 0) > 0 and overrides:
-        notes.append("mdp pominięte: przedłużenie liczy z ustawieniami produkcji, którą przedłuża")
+    if p.get("extend_ns", 0) > 0:
+        if overrides:
+            notes.append("mdp pominięte: przedłużenie liczy z ustawieniami produkcji, którą przedłuża")
+    else:
+        for stage, key in (("nvt", "nvt_ps"), ("npt", "npt_ps")):
+            if overrides.get(stage) and not p.get(key, 0) > 0:
+                notes.append(f"mdp: etap {stage} pominięty ({key}=0), jego zmiany nie zostały użyte")
     return notes
 
 
@@ -135,12 +141,19 @@ def system_table(gdir: Path, p: dict, water: str, charge: float, gro: str) -> di
 # --- MD stages ------------------------------------------------------------------------------------------------------
 
 def write_mdps(gdir: Path, plan, p: dict):
-    overrides = M.parse_overrides(p.get("mdp", ""))
+    overrides = M.parse_stage_overrides(p.get("mdp", ""))
     for s in plan:
         path = gdir / f"{s.name}.mdp"
         if path.exists() and (gdir / f"{s.name}.tpr").exists():
             continue  # a stage already prepared keeps its .mdp (it must match the .tpr)
-        write_text(path, M.make_mdp(s, p["ff"], p["seed"], overrides if s.name == "md" else None))
+        write_text(path, M.make_mdp(s, p["ff"], p["seed"], overrides.get(s.name)))
+
+
+def write_script(gdir: Path, plan, env: dict) -> Path:
+    """gromacs/run.sh: the stages exactly as run_stages runs them, for the owner to edit and send back."""
+    path = write_text(gdir / E.SCRIPT, E.run_script([(s.name, s.grompp) for s in plan], env.get("MD_MAXWARN") or "0"))
+    path.chmod(0o755)
+    return path
 
 
 def run_stages(gdir: Path, plan, env: dict):
@@ -162,14 +175,19 @@ def actual_plan(d: Path, plan, engine: str):
         if not s.dynamic:
             continue
         try:
+            if engine == "openmm":
+                info = json.loads((d / f"{s.name}.done.json").read_text())
+                s.temp = float(info.get("temp", s.temp))
+                if s.name != "md":
+                    s.nsteps = info["end_step"] - info["first_step"]
+            else:
+                mdp = M.parse_mdp((d / f"{s.name}.mdp").read_text())
+                s.dt = float(mdp.get("dt", M.DT_PS))
+                s.temp = float(mdp["ref_t"].split()[0])
+                s.nsteps = int(mdp["nsteps"])
             if s.name == "md":
                 s.nsteps = X.segment_end_step(d, X.production_segments(d)[-1])
-            elif engine == "openmm":
-                info = json.loads((d / f"{s.name}.done.json").read_text())
-                s.nsteps = info["end_step"] - info["first_step"]
-            else:
-                s.nsteps = int(M.parse_mdp((d / f"{s.name}.mdp").read_text())["nsteps"])
-        except (OSError, KeyError, ValueError):
+        except (OSError, KeyError, ValueError, IndexError):
             pass
     return plan
 
@@ -193,9 +211,9 @@ def main(argv=None) -> int:
     engine = p.get("engine", "gromacs")
     extend = p.get("extend_ns", 0) > 0
     d, out = work / (ODIR if engine == "openmm" else GDIR), work / OUT
-    plan = M.plan_stages(p)
     try:
         notes = check_params(p)
+        plan = M.plan_stages(p)
         d.mkdir(exist_ok=True)
         out.mkdir(exist_ok=True)
         if engine == "gromacs" and not shutil.which("gmx", path=env.get("PATH")):
@@ -224,6 +242,7 @@ def main(argv=None) -> int:
             else:
                 system = build_system(d, p, env)
                 write_mdps(d, plan, p)
+                write_script(d, plan, env)
                 run_stages(d, plan, env)
         from . import analysis
 
@@ -235,7 +254,7 @@ def main(argv=None) -> int:
             data = omm.collect(d, out, plan, system)
         else:
             data = analysis.collect_gromacs(d, out, plan, system, env)
-        overrides = [] if extend else M.parse_overrides(p.get("mdp", ""))
+        overrides = {} if extend else M.parse_stage_overrides(p.get("mdp", ""))
         segments = X.production_segments(d) if X.segment_done(d, "md") else ["md"]
         analysis.report(work, out, data, p, plan, struct, system,
                         {"notes": notes, "overrides": overrides, "segments": segments})

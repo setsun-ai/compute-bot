@@ -8,6 +8,7 @@ from .gmxtools import RecipeError
 
 DT_PS = 0.002  # 2 fs, possible thanks to h-bond constraints
 EQUIL_T_MAX = 300.0  # equilibrate at room temperature, heat (if asked) only in production
+STAGE_NAMES = ("em", "nvt", "npt", "md")  # the prefixes params.mdp accepts; no prefix = production
 
 
 def nsteps(ps: float) -> int:
@@ -65,22 +66,30 @@ class Stage:
     pcoupl: bool = False
     grompp: list = field(default_factory=list)
     first_step: int = 0  # an extension continues the step count of the run it extends
+    dt: float = DT_PS
 
     @property
     def ps(self) -> float:
-        return self.nsteps * DT_PS
+        return self.nsteps * self.dt
 
     @property
     def dynamic(self) -> bool:
         return self.name != "em"
 
 
+def equilibration_temp(p: dict) -> float:
+    """T_eq when given, else room temperature (or T when T is lower)."""
+    t_eq = float(p.get("T_eq") or 0)
+    return t_eq if t_eq > 0 else min(float(p["T"]), EQUIL_T_MAX)
+
+
 def plan_stages(p: dict) -> list[Stage]:
     """EM, then NVT and NPT with heavy-atom position restraints (skipped when 0 ps), then free production.
     Each stage starts from the previous coordinates (and checkpoint: velocities, thermostat state); velocities are
-    generated once, in the first dynamic stage."""
+    generated once, in the first dynamic stage. Stage overrides from params.mdp that change the length, time step or
+    temperature are reflected in the plan (progress and summary follow what is really run)."""
     t_prod = float(p["T"])
-    t_eq = min(t_prod, EQUIL_T_MAX)
+    t_eq = equilibration_temp(p)
     npt_prod = p.get("ensemble", "npt") != "nvt"
     stages = [Stage("em", "minimalizacja", 50000)]
     if p["nvt_ps"] > 0:
@@ -99,7 +108,43 @@ def plan_stages(p: dict) -> list[Stage]:
         prev = s.name
     first_dynamic = next(s for s in stages if s.dynamic)
     first_dynamic.gen_vel = True
+    overrides = parse_stage_overrides(p.get("mdp", "")) if p.get("engine", "gromacs") == "gromacs" else {}
+    for s in stages:
+        adjust_stage(s, overrides.get(s.name, []))
     return stages
+
+
+def _override(overrides, key: str) -> str | None:
+    """The value the overrides give `key` (the last one wins, as in apply_overrides), else None."""
+    found = None
+    for k, v in overrides or ():
+        if _norm(k) == _norm(key):
+            found = v
+    return found
+
+
+def _number(key: str, value: str) -> float:
+    try:
+        return float(value.split()[0])
+    except (ValueError, IndexError):
+        raise RecipeError(f"mdp: {key}={value} – oczekuję liczby") from None
+
+
+def adjust_stage(stage: Stage, overrides) -> Stage:
+    """Apply the overrides that change the plan itself: dt (the stage keeps its length in ps unless nsteps is given
+    too), nsteps, ref_t (first group; it beats T / T_eq, gen_temp follows)."""
+    ps = stage.ps
+    dt, n, ref_t = (_override(overrides, k) for k in ("dt", "nsteps", "ref_t"))
+    if stage.dynamic and dt is not None:
+        stage.dt = _number("dt", dt)
+        if stage.dt <= 0:
+            raise RecipeError(f"mdp: dt={dt} – krok czasowy musi być dodatni")
+        stage.nsteps = int(round(ps / stage.dt))
+    if n is not None:
+        stage.nsteps = int(_number("nsteps", n))
+    if stage.dynamic and ref_t is not None:
+        stage.temp = _number("ref_t", ref_t)
+    return stage
 
 
 def _fmt(x: float) -> str:
@@ -114,19 +159,32 @@ def output_intervals(stage: Stage) -> tuple[int, int]:
 _KEY = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
 
 
-def parse_overrides(text: str) -> list[tuple[str, str]]:
-    """`key=value;key=value` from params.mdp; only the syntax is checked, grompp judges the content."""
-    out = []
+def parse_stage_overrides(text: str) -> dict[str, list[tuple[str, str]]]:
+    """`[stage:]key=value;...` from params.mdp → {stage: [(key, value), ...]} in the given order; no prefix means
+    the production (md). Only the syntax is checked, grompp judges the content."""
+    out: dict[str, list[tuple[str, str]]] = {}
     for item in re.split(r"[;\n]", text or ""):
         item = item.strip()
         if not item:
             continue
         key, sep, value = (part.strip() for part in item.partition("="))
+        stage = "md"
+        if ":" in key:
+            stage, key = (part.strip() for part in key.split(":", 1))
+            if stage.lower() not in STAGE_NAMES:
+                raise RecipeError(f"mdp: „{item}” – nieznany etap „{stage}”; dozwolone przedrostki: "
+                                  f"{', '.join(STAGE_NAMES)} (bez przedrostka = produkcja md), np. nvt:ref_t=310 310")
+            stage = stage.lower()
         if not sep or not _KEY.fullmatch(key) or not value or "=" in value:
-            raise RecipeError(f"mdp: „{item}” – oczekuję klucz=wartość rozdzielone średnikami, "
-                              "np. mdp=nstxout-compressed=500;tcoupl=nose-hoover")
-        out.append((key, value))
+            raise RecipeError(f"mdp: „{item}” – oczekuję [etap:]klucz=wartość rozdzielone średnikami, "
+                              "np. mdp=nstxout-compressed=500;npt:tau_p=5")
+        out.setdefault(stage, []).append((key, value))
     return out
+
+
+def parse_overrides(text: str, stage: str = "md") -> list[tuple[str, str]]:
+    """The overrides of one stage (default: the production, i.e. entries without a prefix)."""
+    return parse_stage_overrides(text).get(stage, [])
 
 
 def _norm(key: str) -> str:
@@ -151,7 +209,7 @@ def make_mdp(stage: Stage, ff: str, seed: int, overrides=None) -> str:
     if stage.name == "em":
         rows = [("integrator", "steep"), ("emtol", "1000.0"), ("emstep", "0.01"), ("nsteps", str(stage.nsteps)),
                 ("nstenergy", "10"), ("nstlist", "10")] + nonbonded(ff) + [("pbc", "xyz")]
-        return render(rows, "Energy minimisation (steepest descent)")
+        return render(apply_overrides(rows, overrides), "Energy minimisation (steepest descent)")
     nstxout, nstenergy = output_intervals(stage)
     nstlog = max(nice_interval(stage.nsteps, 100), nstenergy)
     rows = []
@@ -159,7 +217,7 @@ def make_mdp(stage: Stage, ff: str, seed: int, overrides=None) -> str:
         rows.append(("define", "-DPOSRES"))
     t = _fmt(stage.temp)
     rows += [
-        ("integrator", "md"), ("dt", _fmt(DT_PS)), ("nsteps", str(stage.nsteps)),
+        ("integrator", "md"), ("dt", _fmt(stage.dt)), ("nsteps", str(stage.nsteps)),
         ("nstxout-compressed", str(nstxout)), ("compressed-x-grps", "System"),
         ("nstenergy", str(nstenergy)), ("nstcalcenergy", str(min(100, nstenergy))), ("nstlog", str(nstlog)),
         ("continuation", "no" if stage.gen_vel else "yes"),

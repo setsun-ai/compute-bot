@@ -19,6 +19,7 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
 | `ff` | amber99sb-ildn | pole siłowe: amber99sb-ildn, amber03, amber99sb, charmm27, oplsaa, gromos54a7 |
 | `water` | auto | woda; `auto` = zgodna z polem: AMBER/CHARMM → tip3p, OPLS-AA → tip4p, GROMOS → spc |
 | `T` | 300 | temperatura produkcji [K] |
+| `T_eq` | 0 | temperatura równowagowania NVT i NPT [K] (też `gen_temp`); 0 = 300 K, albo T, gdy T < 300 |
 | `ns` | 1 | długość produkcji [ns] |
 | `nvt_ps`, `npt_ps` | 50, 50 | równowagowanie z więzami położeń atomów ciężkich [ps] (0 = pomiń etap) |
 | `salt` | 0.15 | NaCl [M]; układ jest zawsze zobojętniany |
@@ -28,7 +29,7 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
 | `seed` | -1 | ziarno prędkości początkowych i genion (-1 = losowe) |
 | `ensemble` | npt | produkcja w NPT (C-rescale / barostat MC) albo NVT |
 | `engine` | gromacs | `gromacs` albo `openmm` (ten sam protokół i te same wyniki) |
-| `mdp` | – | tylko GROMACS: zmiany w mdp produkcji, `klucz=wartość;klucz=wartość` |
+| `mdp` | – | tylko GROMACS: zmiany w plikach mdp, `klucz=wartość;nvt:klucz=wartość` (bez przedrostka = produkcja) |
 | `extend_ns` | 0 | dolicz tyle ns do skończonej produkcji (komenda /dolicz) |
 
 ## Co się dzieje
@@ -44,7 +45,7 @@ Przykład jak w projekcie 1 („Symulacje molekularne”): `md pdb=1E0L ff=amber
 3. **Etapy**: minimalizacja (steep, Fmax < 1000), NVT z `-DPOSRES` (prędkości z `gen_vel`, tylko tu), NPT z
    `-DPOSRES` i C-rescale, produkcja bez więzów. Krok 2 fs, więzy h-bonds (LINCS), PME, V-rescale (Protein /
    Non-Protein), ciągłość współrzędnych i prędkości przez `-t poprzedni.cpt`. Równowagowanie w 300 K (albo w T, gdy
-   T < 300), produkcja w T – tak jak „podgrzanie do 600 K” w projekcie. Ustawienia oddziaływań zależą od pola
+   T < 300; inna temperatura: `T_eq=310`), produkcja w T – tak jak „podgrzanie do 600 K” w projekcie. Ustawienia oddziaływań zależą od pola
    (CHARMM: force-switch 1.0–1.2 nm, GROMOS: 1.4 nm, pozostałe: 1.0 nm + DispCorr).
 4. **Postęp**: `etap 3/4: NPT 45% (krok 11250/25000), koniec etapu ok. 10.11 14:05; do końca całości ~2 h 10 min`.
    Dla ~13 tys. atomów laptop liczy rzędu 4–8 ns/dzień, więc 0.5 ns w 600 K to kilka godzin.
@@ -70,9 +71,28 @@ Ten sam protokół w OpenMM (CPU, `COMPUTE_THREADS` wątków), pliki w `openmm/`
 
 ## mdp=… (tylko GROMACS)
 
-Zmienia lub dopisuje opcje w `md.mdp` produkcji, np. `md pdb=1L2Y mdp=nstxout-compressed=100;tcoupl=nose-hoover;tau_t=1.0 1.0`.
-Sprawdzana jest tylko składnia (`klucz=wartość`, `-` i `_` w kluczu znaczą to samo); resztę ocenia grompp – jego
-ostrzeżenie trafia do komunikatu błędu. Zmiany są wypisane w podsumowaniu. Z `engine=openmm` – błąd.
+Zmienia lub dopisuje opcje w plikach `.mdp`, np. `md pdb=1L2Y mdp=nstxout-compressed=100;tcoupl=nose-hoover;tau_t=1.0 1.0`.
+Bez przedrostka – produkcja (`md.mdp`); inny etap z przedrostkiem `em:`, `nvt:`, `npt:` albo `md:`, np.
+`mdp=nvt:ref_t=310 310;npt:tau_p=5;em:emtol=500;md:dt=0.001`. Nieznany przedrostek – błąd z listą dozwolonych.
+
+- Sprawdzana jest tylko składnia (`[etap:]klucz=wartość`, `-` i `_` w kluczu znaczą to samo); resztę ocenia grompp –
+  jego ostrzeżenie trafia do komunikatu błędu.
+- `dt` zmienia krok, ale długość etapu w ps zostaje (np. `md:dt=0.001` przy `ns=1` → 1 000 000 kroków), chyba że
+  podasz też `nsteps`. `ref_t` ma pierwszeństwo przed `T` / `T_eq` (a `gen_temp` idzie za nim) – podsumowanie mówi,
+  w jakiej temperaturze naprawdę liczono.
+- Podsumowanie wypisuje zmiany osobno dla każdego etapu. Zmiany etapu, który jest pominięty (`nvt_ps=0`), dają uwagę.
+- Z `engine=openmm` – błąd; przy `extend_ns` – pomijane (przedłużenie liczy z ustawieniami produkcji).
+
+## gromacs/run.sh – ten sam przebieg do własnej edycji
+
+Po zbudowaniu układu (GROMACS) przepis zapisuje `gromacs/run.sh`: wszystkie etapy MD tego zadania jako linie
+`md_step` dokładnie takie, jak je uruchomił (te same `-f/-c/-r/-t/-p`, to samo `MD_MAXWARN`). Startem jest
+`ions.gro` (białko w wodzie z jonami). Żeby coś zmienić: zmień wybrane `.mdp` (albo linie w `run.sh`) i wyślij
+folder jako zip do bota – policzy go jak własny skrypt (zob. `docs/skrypty.md`). Do zipa wystarczą: `run.sh`,
+`ions.gro`, `topol.top`, `*.itp` i `em.mdp`, `nvt.mdp`, `npt.mdp`, `md.mdp` (bez trajektorii i checkpointów –
+etapy policzą się od nowa). Skrypt da się uruchomić ponownie: gotowe etapy są pomijane. `md_step` jest w bocie;
+u siebie zamiast niego: `gmx grompp -o NAZWA.tpr opcje…` i `gmx mdrun -deffnm NAZWA`. Przedłużeń (`extend_ns`)
+i analizy skrypt nie zawiera.
 
 ## extend_ns – doliczanie
 
@@ -93,7 +113,8 @@ ostrzeżenie trafia do komunikatu błędu. Zmiany są wypisane w podsumowaniu. Z
   `rg.csv`, `wiazania_h.csv`, `dssp.csv`, `em_energia.csv`), `uklad.csv`, `wydajnosc.csv`, `struktura.txt`,
   do obejrzenia: `bialko_em.pdb` + `bialko.xtc` (samo białko, dopasowane) i `bialko_klatki.pdb` (wielomodelowy,
   ≤ ~20 MB, np. do PyMOL).
-- `gromacs/` – wszystkie pliki GROMACS (`topol.top`, `*.mdp`, `*.tpr`, `*.log`, `*.edr`, `*.xtc`, `*_noPBC.xtc`);
+- `gromacs/` – wszystkie pliki GROMACS (`run.sh`, `topol.top`, `*.mdp`, `*.tpr`, `*.log`, `*.edr`, `*.xtc`,
+  `*_noPBC.xtc`);
   przy `engine=openmm` – `openmm/` (`system.xml`, `system.pdb`, `*.state.xml`, `*.part*.dcd`, `*.part*.csv`).
 
 ## Uwagi
