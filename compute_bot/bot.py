@@ -346,6 +346,7 @@ class Bot:
         if word == "usun" and rest == "stare":
             return self.remove_old_command()
         numbered = {"job": self.job_view, "log": self.log_command, "get": self.get_command,
+                    "skrypt": self.script_command,
                     "cancel": self.cancel_command, "retry": self.retry_command, "top": self.top_command,
                     "usun": self.remove_command}
         if word not in numbered:
@@ -480,6 +481,13 @@ class Bot:
             return self.say("Użycie: /dolicz N ILE_NS, np. /dolicz 4 5 – zadanie #4 o 5 ns dłużej.")
         child = actions.extend(self.store, int(words[0]), words[1])
         self.say(f"➕ <b>#{child.id}</b>: #{words[0]} o {child.params['extend_ns']:g} ns dłużej, w kolejce.")
+
+    def script_command(self, job, _rest=""):
+        """A GROMACS md job as a zip to edit: inputs, .mdp files and run.sh with the same md_step stages."""
+        name, data = actions.script_zip(self.store, job)
+        self.send_file(name, data,
+                       f"📝 #{job} jako skrypt: zmień pliki .mdp (albo run.sh) i odeślij ten zip – policzy się "
+                       "od minimalizacji z Twoimi ustawieniami. /guide skrypty")
 
     def log_command(self, job, _rest=""):
         self.say(f"📜 <b>#{job}</b>\n<pre>{esc(self.store.log_tail(job, 3500))}</pre>")
@@ -720,8 +728,10 @@ class Bot:
             body = summary.read_text(errors="replace")[:3200]
         else:
             body = self.store.log_tail(job, 1200)
-        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>",
-                 keyboard([[("📜 Log", f"j:{job}:log"), ("🔁 Ponów", f"j:{job}:retry"), ("🗑️ Usuń", f"j:{job}:usun")]]))
+        rows = [[("📜 Log", f"j:{job}:log"), ("🔁 Ponów", f"j:{job}:retry"), ("🗑️ Usuń", f"j:{job}:usun")]]
+        if (work / "gromacs" / "run.sh").exists():
+            rows.append([("📝 Zrób z tego skrypt", f"j:{job}:skrypt")])
+        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>", keyboard(rows))
         highlights = work / "highlights.txt"
         if highlights.exists():
             for rel in highlights.read_text().split()[:4]:

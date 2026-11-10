@@ -563,3 +563,60 @@ def test_files_too_big_even_for_parts_point_to_remote_access(env):
     job = big_job(store, size=3 * 1024 ** 3)
     bot.handle_update(message(f"/get {job} traj.xtc czesci"))
     assert "remote.sh" in api.last_text() and api.sent("sendDocument") == []
+
+
+# --- an md job as an editable script ------------------------------------------------------------------
+
+def md_job_with_script(store, engine="gromacs"):
+    job = store.create("recipe", "md", "md 1E0L", jobs.RECIPES["md"].validate({"pdb": "1E0L", "engine": engine}),
+                       {}).id
+    g = store.work(job) / "gromacs"
+    g.mkdir()
+    run = ("MD_MAXWARN=0 md_step em -f em.mdp -c ions.gro -p topol.top\n"
+           "MD_MAXWARN=0 md_step md -f md.mdp -c em.gro -t em.cpt -p topol.top\n")
+    for name, data in {"run.sh": run, "em.mdp": "x", "md.mdp": "nsteps = 500\n", "topol.top": "top",
+                       "topol_Protein.itp": "itp", "ions.gro": "gro", "md.xtc": "x" * 1000, "md.cpt": "c"}.items():
+        (g / name).write_text(data)
+    store.set_status(job, jobs.Status("done", attempt=1, started=1.0, finished=2.0, exit_code=0))
+    return job
+
+
+def test_a_finished_md_job_becomes_an_editable_script(env):
+    bot, api, store, _ = env
+    job = md_job_with_script(store)
+    bot.handle_update(message(f"/skrypt {job}"))
+    name, data = api.sent("sendDocument")[-1][2]["document"]
+    names = set(zipfile.ZipFile(io.BytesIO(data)).namelist())
+    assert name == f"skrypt_{job:04d}.zip"
+    assert {"run.sh", "md.mdp", "topol.top", "topol_Protein.itp", "ions.gro"} <= names
+    assert not names & {"md.xtc", "md.cpt"}
+    assert "run.sh" in api.sent("sendDocument")[-1][1]["caption"]
+
+
+def test_the_script_zip_goes_back_in_as_a_script_job(env):
+    bot, api, store, _ = env
+    job = md_job_with_script(store)
+    bot.handle_update(message(f"/skrypt {job}"))
+    _, data = api.sent("sendDocument")[-1][2]["document"]
+    upload(bot, api, f"skrypt_{job:04d}.zip", data)
+    assert store.specs()[-1].kind == "script"
+
+
+def test_only_gromacs_md_jobs_have_a_script(env):
+    bot, api, store, _ = env
+    upload(bot, api, "a.zip", zip_bytes({"run.sh": "true"}))
+    bot.handle_update(message("/skrypt 1"))
+    assert "md" in api.last_text() and not api.sent("sendDocument")
+    job = md_job_with_script(store, engine="openmm")
+    (store.work(job) / "gromacs" / "run.sh").unlink()
+    bot.handle_update(message(f"/skrypt {job}"))
+    assert "GROMACS" in api.last_text()
+
+
+def test_md_results_offer_the_script_button(env):
+    bot, api, store, _ = env
+    md_job_with_script(store)
+    bot.tick()
+    data = [b.get("callback_data") for c in api.sent("sendMessage") if c[1].get("reply_markup")
+            for row in json.loads(c[1]["reply_markup"])["inline_keyboard"] for b in row]
+    assert "j:1:skrypt" in data

@@ -45,7 +45,9 @@ Zmierzone na tym laptopie: ~50 ns na dobę dla 6 tys. atomów (Trp-cage w wodzie
 
 **Dalej**  
 `/dolicz 4 5` – skończone zadanie #4 o 5 ns dłużej, bez liczenia od zera.  
-`mdp=nstxout-compressed=500` – własne opcje GROMACS dla produkcji.  
+`mdp=nstxout-compressed=500` – dowolna opcja GROMACS dla produkcji; inny etap z przedrostkiem: `mdp=nvt:tau_t=1.0 1.0;md:dt=0.001`.  
+`T_eq=350` – równowagowanie w innej temperaturze niż 300 K.  
+`/skrypt 4` – zadanie jako zip do edycji (pliki .mdp + run.sh); zmieniasz, odsyłasz, liczy się z Twoimi ustawieniami.  
 Laptop się zrestartuje? Zadanie wznowi się samo z punktu sprzed kilku minut.  
 
 ## 📈 QSAR / QSPR

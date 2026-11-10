@@ -206,6 +206,10 @@ class App:
             return {"ok": True}
         if action == "retry":
             return {"id": actions.retry(self.store, job, body.get("params") or None).id}
+        if action == "script":
+            name, data = actions.script_zip(self.store, job)
+            self.send_document(name, data, f"📝 #{job} jako skrypt: zmień .mdp albo run.sh i odeślij ten zip.")
+            return {"ok": True}
         if action == "link":
             rel = str(body.get("path", ""))
             if self.store.result_file(job, rel) is None:

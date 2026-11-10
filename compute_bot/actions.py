@@ -4,7 +4,9 @@ Each function checks its inputs and raises ParamError with words for the owner; 
 """
 from __future__ import annotations
 
+import io
 import shutil
+import zipfile
 from pathlib import Path
 
 from . import jobs
@@ -85,3 +87,20 @@ def start_staged(store, folder, recipe, name, typed, fetch=()):
 
 def discard_staged(folder):
     shutil.rmtree(folder, ignore_errors=True)
+
+
+def script_zip(store, job):
+    """(file name, zip bytes) of a GROMACS md job as an editable script: inputs, .mdp files, run.sh."""
+    spec = store.spec(job)
+    if spec.kind != "recipe" or spec.entry != "md":
+        raise ParamError(f"Skrypt robię z zadań md; #{job} to {spec.name}.")
+    gromacs = store.work(job) / "gromacs"
+    if not (gromacs / "run.sh").exists():
+        raise ParamError(f"#{job} nie ma skryptu GROMACS (silnik OpenMM, zadanie sprzed wersji 0.2.1 albo układ "
+                         "jeszcze się nie zbudował).")
+    from .recipes.md.export import script_files
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
+        for rel in script_files(gromacs):
+            archive.write(gromacs / rel, rel)
+    return f"skrypt_{job:04d}.zip", out.getvalue()

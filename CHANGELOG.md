@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.1 (2026-11)
+
+- **Nietypowe ustawienia MD:** `T_eq=` (temperatura równowagowania), `mdp=` dla każdego etapu z przedrostkiem
+  (`nvt:tau_t=1.0 1.0;md:dt=0.001`), a `/skrypt N` (📝 przy wynikach) oddaje zadanie jako zip z plikami `.mdp` i
+  `run.sh` – zmieniasz, odsyłasz, liczy się z Twoimi ustawieniami. Działa dla zadań md liczonych od tej wersji.
+
 ## 0.2.0 (2026-11)
 
 - **Przewodnik** (`/guide`, 📖 w panelu, `docs/przewodnik.md`): pierwsze kroki, dynamika, QSAR, omika, dokowanie,

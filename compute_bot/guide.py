@@ -65,7 +65,11 @@ TOPICS = (
         "• <i>DSSP</i>: ile helis i β zostaje w czasie.\n\n"
         "<b>Dalej</b>\n"
         "<code>/dolicz 4 5</code> – skończone zadanie #4 o 5 ns dłużej, bez liczenia od zera.\n"
-        "<code>mdp=nstxout-compressed=500</code> – własne opcje GROMACS dla produkcji.\n"
+        "<code>mdp=nstxout-compressed=500</code> – dowolna opcja GROMACS dla produkcji; inny etap z "
+        "przedrostkiem: <code>mdp=nvt:tau_t=1.0 1.0;md:dt=0.001</code>.\n"
+        "<code>T_eq=350</code> – równowagowanie w innej temperaturze niż 300 K.\n"
+        "<code>/skrypt 4</code> – zadanie jako zip do edycji (pliki .mdp + run.sh); zmieniasz, odsyłasz, "
+        "liczy się z Twoimi ustawieniami.\n"
         "Laptop się zrestartuje? Zadanie wznowi się samo z punktu sprzed kilku minut."), "md", "md"),
     Topic("qsar", "📈 QSAR / QSPR", (
         "<b>Co wysłać</b>\n"
