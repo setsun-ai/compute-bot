@@ -23,6 +23,8 @@ if grep -q '^WEB_URL=' /etc/compute-bot.env; then
 else
   echo "WEB_URL=https://$name/" >> /etc/compute-bot.env
 fi
+grep -q '^SSH_TARGET=' /etc/compute-bot.env && sed -i "s|^SSH_TARGET=.*|SSH_TARGET=$user@$name|" /etc/compute-bot.env \
+  || echo "SSH_TARGET=$user@$name" >> /etc/compute-bot.env
 systemctl restart compute-bot compute-web
 cat <<INFO
 

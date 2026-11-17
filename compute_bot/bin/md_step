@@ -2,7 +2,8 @@
 # One GROMACS stage that survives a restart: a finished stage is skipped, an interrupted one resumes from its checkpoint.
 #   md_step NAME [grompp options...]   e.g.  md_step nvt -f nvt.mdp -c em.gro -r em.gro -p topol.top
 # Without grompp options NAME.tpr must already exist (a job that is just a .tpr file).
-# Extra mdrun options: MD_MDRUN_ARGS="-pin on"; grompp warnings allowed: MD_MAXWARN=1.
+# Extra mdrun options: MD_MDRUN_ARGS="-pin on"; grompp warnings allowed: MD_MAXWARN=1;
+# checkpoint every MD_CHECKPOINT_MIN minutes (5).
 set -euo pipefail
 name=${1:?użycie: md_step NAZWA [opcje grompp]}
 shift
@@ -22,4 +23,4 @@ if [ -f "$name.cpt" ]; then
   resume=(-cpi "$name.cpt")
 fi
 # shellcheck disable=SC2086
-gmx mdrun -v -deffnm "$name" -nt "$threads" -cpt 5 ${resume[@]+"${resume[@]}"} ${MD_MDRUN_ARGS:-}
+gmx mdrun -v -deffnm "$name" -nt "$threads" -cpt "${MD_CHECKPOINT_MIN:-5}" ${resume[@]+"${resume[@]}"} ${MD_MDRUN_ARGS:-}

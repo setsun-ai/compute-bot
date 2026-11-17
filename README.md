@@ -27,6 +27,13 @@ Komendy: `/jobs`, `/job N`, `/log N`, `/get N [plik]`, `/cancel N`, `/retry N [k
 `/usun N`, `/usun stare`, `/pauza`, `/wznow`, `/co 3` (raport postępu co 3 h), `/cisza 23-7`, `/system`, `/env`,
 `/update`, `/rollback`, `/help [przepis]`. Bot ostrzega, gdy runner przestaje odpowiadać albo kończy się dysk.
 
+**Nie wiesz, od czego zacząć?** [docs/przewodnik.md](docs/przewodnik.md) (w bocie: `/guide`, w panelu: 📖) –
+co wysłać, które ustawienia mają znaczenie, ile to trwa, jak czytać wyniki i co robić, gdy coś pójdzie źle; każdy
+rodzaj obliczeń ma przykład do uruchomienia jednym przyciskiem.
+
+**Wynik za duży na Telegram (50 MB)?** Bot daje link do pobrania ważny 24 h (przez adres panelu, ze wznawianiem),
+gotowe polecenie `scp`, a bez Tailscale – plik w kawałkach (`/get N plik czesci`).
+
 ## Instalacja (Debian/Ubuntu, x86_64)
 
 1. Załóż **nowego** bota u [@BotFather](https://t.me/BotFather) (osobny token: dwa programy na jednym się kłócą).

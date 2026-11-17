@@ -79,7 +79,8 @@ def extend_gromacs(work: Path, gdir: Path, p: dict, env: dict) -> str:
     ext_ps = p["extend_ns"] * 1000
     first = segment_end_step(gdir, prev)
     temp, pcoupl = production_settings(gdir)
-    stage = M.Stage(seg, f"przedłużenie {k}", M.nsteps(ext_ps), temp, pcoupl=pcoupl, first_step=first)
+    dt = float(M.parse_mdp((gdir / "md.mdp").read_text()).get("dt", M.DT_PS))  # md:dt=… may have changed it
+    stage = M.Stage(seg, f"przedłużenie {k}", int(round(ext_ps / dt)), temp, pcoupl=pcoupl, first_step=first, dt=dt)
     log = gdir / "extend.log"
     if not (gdir / f"{seg}.tpr").exists():
         run_gmx(["convert-tpr", "-s", f"{prev}.tpr", "-extend", f"{ext_ps:g}", "-o", f"{seg}_tmp.tpr"], gdir, env,

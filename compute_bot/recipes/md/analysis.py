@@ -417,6 +417,23 @@ def plot_dssp(out, dssp, offset) -> str:
 
 # --- summary --------------------------------------------------------------------------------------------------------
 
+def override_lines(overrides, plan, p) -> list[str]:
+    """The mdp changes per stage ({stage: [(key, value)]}, a bare list = production) and the ref_t-beats-T note."""
+    if not overrides:
+        return []
+    if not isinstance(overrides, dict):
+        overrides = {"md": list(overrides)}
+    titles = {s.name: s.title for s in plan}
+    parts = [f"{titles.get(name, name)}: " + "; ".join(f"{k}={v}" for k, v in overrides[name])
+             for name in ("em", "nvt", "npt", "md") if overrides.get(name)]
+    out = ["Zmienione opcje (mdp) – " + " | ".join(parts) + "."]
+    ref_t = [v for k, v in overrides.get("md", []) if k.lower().replace("-", "_") == "ref_t"]
+    if ref_t:
+        out.append(f"- ref_t={ref_t[-1]} z mdp ma pierwszeństwo przed T={float(p['T']):g} K: produkcja liczona "
+                   f"w {ref_t[-1].split()[0]} K.")
+    return out
+
+
 def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf, info=None) -> str:
     info = info or {}
     done = {s.name for s in stages}
@@ -429,8 +446,7 @@ def make_summary(p, plan, stages, struct, system, em, energies, rmsd, res, perf,
     if len(segs) > 1:
         lines.append(f"Przedłużenie: produkcja doliczana {len(segs) - 1}× (segmenty {', '.join(segs)}), razem "
                      f"{prod.ps / 1000:g} ns; analiza obejmuje całą produkcję.")
-    if info.get("overrides"):
-        lines.append("Zmienione opcje produkcji (mdp): " + "; ".join(f"{k}={v}" for k, v in info["overrides"]) + ".")
+    lines += override_lines(info.get("overrides"), plan, p)
     lines += [f"- {n}" for n in info.get("notes", [])]
     chains = ", ".join(f"{c['name']} ({c['residues']} reszt)" for c in struct["chains"])
     model = f"model {p['model']} z {struct['models']}" if struct["models"] > 1 else "1 model"

@@ -13,19 +13,22 @@ import html
 import io
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, actions, drafts, jobs
+from . import VERSION, actions, drafts, examples, guide, jobs, links
 from .drafts import keyboard
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
 
 MAX_DOWNLOAD = 20 * 1024 ** 2  # Telegram's limit for files a bot can download
 MAX_UPLOAD = 49 * 1024 ** 2  # and for files it can send
+PART = 45 * 1024 ** 2  # a big file sent in pieces: size of one piece
+MAX_PARTS_TOTAL = 1024 ** 3  # beyond this, pieces through Telegram stop making sense
 ICONS = {"queued": "⏳", "running": "⚙️", "paused": "🌡️", "done": "✅", "failed": "❌", "cancelled": "⏹️"}
 HELP = (
     "🧪 <b>Kolejka obliczeń</b> na laptopie. Wyślij plik, a policzę i odeślę wyniki.\n\n"
@@ -37,6 +40,7 @@ HELP = (
     "💊 zip z receptorem i ligandami + podpis <code>dock</code> – dokowanie\n"
     "🔗 <code>/url LINK omics …</code> – plik większy niż 20 MB (Drive, Dropbox, link)\n\n"
     "Parametry: /help md · /help qsar · /help omics · /help dock\n\n"
+    "/guide – przewodnik krok po kroku z przykładami do wypróbowania\n"
     "/jobs – kolejka · /job N · /log N · /get N [plik] · /cancel N\n"
     "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
     "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
@@ -94,8 +98,9 @@ def system_info(home="."):
 
 class Bot:
     def __init__(self, store, api, owner, state_path, updater=None, clock=time.time, system_info=system_info,
-                 web_url=None, exposure=None):
+                 web_url=None, exposure=None, link_secret="", ssh_target=None):
         self.web_url, self.exposure = web_url, exposure
+        self.link_secret, self.ssh_target = link_secret, ssh_target  # download links; user@host for scp
         self.store, self.api, self.owner = store, api, owner
         self.state_path, self.updater, self.clock = Path(state_path), updater, clock
         self.system_info = system_info
@@ -302,6 +307,14 @@ class Bot:
                 return self.handle_command(f"/{parts[1]} {parts[0]}")
             if action == "d" and len(parts) == 1:
                 return self.remove_confirmed(parts[0])
+            if action == "g":
+                return self.show(message_id, *self.guide_view(rest))
+            if action == "t":
+                return self.try_example(rest)
+            if action == "h":
+                return self.help_command(rest)
+            if action == "u" and rest == "install":
+                return self.update_command()
         except ParamError as e:
             self.say(f"❌ {esc(e)}")
 
@@ -321,8 +334,9 @@ class Bot:
         word, rest = word[1:].split("@")[0].lower(), rest.strip()
         if word in RECIPES:
             return self.recipe_command(word, text, rest)
-        general = {"start": self.help_command, "help": self.help_command, "menu": self.help_command,
-                   "pomoc": self.help_command, "jobs": self.list_jobs, "kolejka": self.list_jobs,
+        general = {"start": self.start_command, "help": self.help_command, "menu": self.help_command,
+                   "pomoc": self.help_command, "guide": self.guide_command, "przewodnik": self.guide_command,
+                   "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
                    "dolicz": self.extend_command, "panel": self.panel_command, "funnel": self.funnel_command,
@@ -332,6 +346,7 @@ class Bot:
         if word == "usun" and rest == "stare":
             return self.remove_old_command()
         numbered = {"job": self.job_view, "log": self.log_command, "get": self.get_command,
+                    "skrypt": self.script_command,
                     "cancel": self.cancel_command, "retry": self.retry_command, "top": self.top_command,
                     "usun": self.remove_command}
         if word not in numbered:
@@ -343,6 +358,39 @@ class Bot:
 
     def help_command(self, rest):
         self.say(RECIPES[rest].usage() if rest in RECIPES else HELP)
+
+    def start_command(self, _rest=""):
+        rows = [[("📖 Przewodnik", "g:"), ("▶️ Wypróbuj: krótka dynamika", "t:md")]]
+        if self.web_url:
+            rows.append([("🧾 Panel", self.web_url)])
+        self.say("🧪 <b>Kolejka obliczeń</b> na laptopie.\nWyślij plik albo komendę, ustaw kartę, naciśnij Start – "
+                 "wyniki wrócą tutaj. Zacznij od przewodnika albo od gotowego przykładu. Ściąga komend: /help",
+                 keyboard(rows))
+
+    def guide_view(self, topic_id=""):
+        """(text, markup) of one topic, or of the list of topics."""
+        topic = guide.BY_ID.get(topic_id)
+        if topic is None:
+            buttons = [(t.title, f"g:{t.id}") for t in guide.TOPICS]
+            rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+            return "📖 <b>Przewodnik</b> – wybierz temat:", keyboard(rows)
+        rows = []
+        if topic.example:
+            rows.append([("▶️ Wypróbuj na przykładzie", f"t:{topic.example}")])
+        if topic.recipe:
+            rows.append([("⚙️ Wszystkie ustawienia", f"h:{topic.recipe}")])
+        rows.append([("↩️ Tematy", "g:")])
+        return f"<b>{topic.title}</b>\n\n{topic.text}", keyboard(rows)
+
+    def guide_command(self, rest=""):
+        self.say(*self.guide_view(rest.strip().lower()))
+
+    def try_example(self, name):
+        example = examples.EXAMPLES.get(name)
+        if example is None:
+            return self.say("Nie ma takiego przykładu.")
+        self.say(f"🧪 {esc(example.note)}")
+        self.open_draft(example.recipe, example.name, dict(example.typed), example.files())
 
     def recipe_command(self, word, text, rest):
         recipe = RECIPES[word]
@@ -434,6 +482,13 @@ class Bot:
         child = actions.extend(self.store, int(words[0]), words[1])
         self.say(f"➕ <b>#{child.id}</b>: #{words[0]} o {child.params['extend_ns']:g} ns dłużej, w kolejce.")
 
+    def script_command(self, job, _rest=""):
+        """A GROMACS md job as a zip to edit: inputs, .mdp files and run.sh with the same md_step stages."""
+        name, data = actions.script_zip(self.store, job)
+        self.send_file(name, data,
+                       f"📝 #{job} jako skrypt: zmień pliki .mdp (albo run.sh) i odeślij ten zip – policzy się "
+                       "od minimalizacji z Twoimi ustawieniami. /guide skrypty")
+
     def log_command(self, job, _rest=""):
         self.say(f"📜 <b>#{job}</b>\n<pre>{esc(self.store.log_tail(job, 3500))}</pre>")
 
@@ -517,12 +572,56 @@ class Bot:
     def get_command(self, job, rel=""):
         if not rel:
             return self.send_results(job)
+        if rel.endswith(" czesci"):
+            return self.send_parts(job, rel[:-len(" czesci")].strip())
         path = self.store.result_file(job, rel)
         if path is None:
             return self.say(f"Nie ma pliku {esc(rel)} w #{job}.")
         if path.stat().st_size > MAX_UPLOAD:
-            return self.say(f"{esc(rel)} ma {size_text(path.stat().st_size)}; Telegram przyjmie najwyżej 50 MB.")
+            return self.say(*self.big_files(job, [(rel, path.stat().st_size)]))
         self.send_file(path.name, path.read_bytes(), f"#{job}")
+
+    def big_files(self, job, files):
+        """How to get files Telegram won't carry: a link through the panel's address, scp, or pieces."""
+        lines = ["📦 Za duże na Telegram (limit 50 MB):"]
+        buttons = []
+        for rel, size in files[:8]:
+            lines.append(f"• <b>{esc(rel)}</b> ({size_text(size)})")
+            if self.ssh_target:
+                where = self.store.work(job) / rel
+                lines.append(f"  <code>scp {esc(self.ssh_target)}:{esc(shlex.quote(str(where)))} .</code>")
+            if self.web_url:
+                token = links.make(self.link_secret, job, rel, self.clock() + links.DAY)
+                buttons.append([(f"⬇️ {PurePosixPath(rel).name} ({size_text(size)})",
+                                 f"url:{self.web_url.rstrip('/')}/dl/{token}")])
+            elif not self.ssh_target and size <= MAX_PARTS_TOTAL:
+                lines.append(f"  <code>/get {job} {esc(rel)} czesci</code> – w kawałkach po 45 MB")
+        if len(files) > 8:
+            lines.append(f"… i {len(files) - 8} innych: /job {job}")
+        if self.web_url:
+            lines.append("Linki działają 24 h, na urządzeniu z Tailscale (albo po /funnel on); przerwane pobieranie "
+                         "można wznowić.")
+        if self.ssh_target:
+            lines.append(f"Cały katalog: <code>scp -r {esc(self.ssh_target)}:{esc(str(self.store.work(job)))} .</code>")
+        if not self.web_url and not self.ssh_target:
+            lines.append("Wygodniej: <code>sudo bash deploy/remote.sh</code> na laptopie – wtedy dostajesz link do "
+                         "pobrania i scp.")
+        return "\n".join(lines), keyboard(buttons) if buttons else None
+
+    def send_parts(self, job, rel):
+        path = self.store.result_file(job, rel)
+        if path is None:
+            return self.say(f"Nie ma pliku {esc(rel)} w #{job}.")
+        size = path.stat().st_size
+        if size > MAX_PARTS_TOTAL:
+            return self.say(f"{esc(rel)} ma {size_text(size)}: to za dużo na kawałki przez Telegram. Na laptopie "
+                            "<code>sudo bash deploy/remote.sh</code> da link do pobrania i scp.")
+        count = -(-size // PART)
+        with open(path, "rb") as source:
+            for number in range(1, count + 1):
+                self.send_file(f"{path.name}.part{number:02d}", source.read(PART), f"#{job} {number}/{count}")
+        self.say(f"Sklej w folderze z kawałkami:\n<code>cat {esc(path.name)}.part* &gt; {esc(path.name)}</code>\n"
+                 f"(Windows: <code>copy /b {esc(path.name)}.part* {esc(path.name)}</code>)")
 
     # --- news about jobs ------------------------------------------------------------------------------
 
@@ -546,11 +645,27 @@ class Bot:
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
-        for token in list(self.state["drafts"]):
-            if (self.store.root / "staging" / token / actions.CLOSED).exists():
-                self.drop(token)  # started from the Mini App
+        changed |= self.check_for_update(now)
+        for closed in (self.store.root / "staging").glob(f"*/{actions.CLOSED}"):
+            self.drop(closed.parent.name)  # started or discarded in the Mini App (its own cards too)
         if changed:
             self.save()
+
+    def check_for_update(self, now):
+        """Once a day: tell about a new release once, with a button that installs it."""
+        if self.updater is None or now - self.state.get("update_checked", 0) < 86400:
+            return False
+        self.state["update_checked"] = now
+        from .updater import UpdateError, version_tuple
+        try:
+            tag = self.updater.latest()
+        except UpdateError:
+            return True
+        if version_tuple(tag[1:]) > version_tuple(VERSION) and self.state.get("update_told") != tag:
+            self.state["update_told"] = tag
+            self.say(f"⬆️ Jest nowa wersja {esc(tag)} (masz {VERSION}). Trwające zadanie nie ucierpi: runner "
+                     "przełączy się po jego końcu.", keyboard([[("⬆️ Zainstaluj", "u:install")]]))
+        return True
 
     def runner_alive(self, beat):
         return bool(beat) and self.clock() - beat.get("time", 0) < 180
@@ -613,8 +728,10 @@ class Bot:
             body = summary.read_text(errors="replace")[:3200]
         else:
             body = self.store.log_tail(job, 1200)
-        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>",
-                 keyboard([[("📜 Log", f"j:{job}:log"), ("🔁 Ponów", f"j:{job}:retry"), ("🗑️ Usuń", f"j:{job}:usun")]]))
+        rows = [[("📜 Log", f"j:{job}:log"), ("🔁 Ponów", f"j:{job}:retry"), ("🗑️ Usuń", f"j:{job}:usun")]]
+        if (work / "gromacs" / "run.sh").exists():
+            rows.append([("📝 Zrób z tego skrypt", f"j:{job}:skrypt")])
+        self.say((header + "\n\n" if header else "") + f"<pre>{esc(body)}</pre>", keyboard(rows))
         highlights = work / "highlights.txt"
         if highlights.exists():
             for rel in highlights.read_text().split()[:4]:
@@ -624,10 +741,14 @@ class Bot:
                              files={"photo": (path.name, path.read_bytes())})
         archive, left_out = self.results_zip(job)
         self.send_file(f"wyniki_{job:04d}.zip", archive, f"#{job}")
-        if left_out:
-            shown = "\n".join(f"<code>/get {job} {esc(rel)}</code> ({size_text(size)})" for rel, size in left_out[:10])
-            more = f"\n… i {len(left_out) - 10} innych" if len(left_out) > 10 else ""
-            self.say(f"📎 Za duże do zipa, pobierz osobno (do 50 MB):\n{shown}{more}")
+        small = [(rel, size) for rel, size in left_out if size <= MAX_UPLOAD]
+        big = [(rel, size) for rel, size in left_out if size > MAX_UPLOAD]
+        if small:
+            shown = "\n".join(f"<code>/get {job} {esc(rel)}</code> ({size_text(size)})" for rel, size in small[:10])
+            more = f"\n… i {len(small) - 10} innych" if len(small) > 10 else ""
+            self.say(f"📎 Nie zmieściły się w zipie, pobierz osobno:\n{shown}{more}")
+        if big:
+            self.say(*self.big_files(job, big))
 
     def results_zip(self, job):
         """Smallest files first until the zip would get too big for Telegram; the log always goes in."""
@@ -696,7 +817,8 @@ def run(api, bot):
             {"command": "jobs", "description": "Kolejka zadań"},
             {"command": "system", "description": "Temperatura, RAM, dysk"},
             {"command": "panel", "description": "Panel (Mini App)"},
-            {"command": "help", "description": "Co umiem"}])})
+            {"command": "guide", "description": "Przewodnik i przykłady"},
+            {"command": "help", "description": "Ściąga komend"}])})
     except TelegramError as e:
         log(f"start: {e}")
     offset, failures = None, 0
@@ -749,7 +871,8 @@ def main(argv):
     from .exposure import Exposure
     web_url = os.environ.get("WEB_URL") or None  # written by deploy/remote.sh once Tailscale serves the panel
     bot = Bot(store, api, int(owner), home / "bot.json", updater=Updater(home / "update"),
-              system_info=lambda: system_info(home), web_url=web_url,
+              system_info=lambda: system_info(home), web_url=web_url, link_secret=token,
+              ssh_target=os.environ.get("SSH_TARGET") or None,
               exposure=Exposure(int(os.environ.get("WEB_PORT", "8787"))))
     if web_url:
         try:  # the "Panel" button next to the message field, like BotFather's Open

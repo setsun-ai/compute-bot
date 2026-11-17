@@ -1,5 +1,6 @@
-"""Input shapes -> Dataset: DIA-NN pg/gg_matrix and long report, MS-DIAL alignment export, generic feature x sample
-tables (with a sample sheet, feature annotation and internal standards in separate files), samples-in-rows tables.
+"""Input shapes -> Dataset: DIA-NN pg/gg_matrix and long report, MS-DIAL alignment export, Agilent Profinder / MFE
+tables, MZmine 3 feature lists, generic feature x sample tables (with a sample sheet, feature annotation and internal
+standards in separate files or sheets of one workbook), samples-in-rows tables.
 
 Everything is matched by content, not by file name alone: the sample sheet is the table with a column that matches
 the matrix column names, the feature table matches the matrix row IDs, the internal standards table has the same
@@ -36,12 +37,29 @@ MSDIAL_LABELS = {"class": "Class", "file type": "File type", "injection order": 
                  "batch id": "Batch ID", "analytical order": "Injection order"}
 
 GROUP_ALIASES = ["group", "grupa", "class", "condition", "treatment", "phenotype", "diagnosis", "label", "status"]
+PROFINDER_TAG = re.compile(r"^\[([^\]]+)\]\s*(.+?)\s*$")
+PROFINDER_QUANT = ["area", "height", "vol", "volume", "abund", "abundance", "quant"]
+MZMINE_LEGACY = re.compile(r"^(.+?)\s+Peak (area|height)$", re.I)
+MZMINE_MODULAR = re.compile(r"^datafile:(.+):(area|height)$", re.I)
+MZMINE_NAME_COLS = ("row identity (main id)", "row identity (all ids)", "compound_name", "lipid_annotations",
+                    "annotation", "row comment")
+# deuterium / 13C labels in a name ("(d7)", "-d9", " d7") but not the sphingoid base "d18:1"
+DEUTERIUM_RE = re.compile(r"(?<![A-Za-z0-9])d(\d{1,2})(?![\d:;])|[(\-]D\d{1,2}\b|(?<![A-Za-z0-9])13C\d*\b"
+                          r"|(?<![A-Za-z0-9])15N\d*\b|\[2H\d*\]|\[13C\d*\]")
+ISTD_WORD_RE = re.compile(r"(?i)(?<![A-Za-z])(istd|internal[ _]?standard|int[ _]?std)(?![A-Za-z])"
+                          r"|(?<![A-Za-z])IS(?![A-Za-z])")
+NOT_A_TABLE = re.compile(r"(?i)readme|dictionary|s[lł]ownik|legend")
+# "DA 12_1B 1207": subject, group (time point), biological sample + extraction letter, run number
+DESIGN_NAME = re.compile(r"^(?P<s>[A-Za-z][A-Za-z0-9]*?)[\s_\-]+(?P<g>\d+)[\s_\-]+(?P<b>\d+)(?P<e>[A-Za-z])"
+                         r"(?:[\s_\-]+(?P<run>\d+))?$")
 TYPE_ALIASES = ["sample_type", "sampletype", "sample type", "file type", "file_type", "type", "typ"]
 ORDER_ALIASES = ["run_order", "injection order", "injection_order", "run order", "runorder", "order",
                  "acquisition_order", "analytical order", "kolejnosc"]
-BATCH_ALIASES = ["batch", "batch id", "batch_id", "partia", "plate"]
-SUBJECT_ALIASES = ["subject_id", "subject", "patient_id", "patient", "individual", "donor", "osoba"]
-ANNOT_NUMERIC = {"mz", "m/z", "mass", "rt", "rt_min", "retention_time", "rt(min)", "average rt(min)", "average mz",
+BATCH_ALIASES = ["batch", "batch id", "batch_id", "analytical_batch", "partia", "plate", "measurement_day", "day"]
+SUBJECT_ALIASES = ["subject_id", "subject", "patient_id", "patient", "individual", "donor", "donor_id", "osoba",
+                   "dawczyni"]
+ANNOT_NUMERIC = {"mz", "m/z", "mass", "mass (avg)", "rt (avg)", "row m/z", "row retention time", "row id",
+                  "rt", "rt_min", "retention_time", "rt(min)", "average rt(min)", "average mz",
                  "n.sequences", "n.proteotypic.sequences", "charge", "isotope_index_candidate", "alignment id",
                  "annotation_level_simulated", "unique_peptides_simulated", "protein_q_value_simulated",
                  "taxonomy_id", "reference rt", "reference m/z", "fill %", "total score", "s/n average",
@@ -57,8 +75,8 @@ FEATURE_COLS = {
     "name": ["metabolite_name", "metabolite name", "compound", "compound_name", "name", "protein_name",
              "protein names", "protein.names", "first.protein.description"],
     "formula": ["molecular_formula_candidate", "formula", "molecular_formula"],
-    "mz": ["mz", "m/z", "average mz", "precursor_mz"],
-    "rt": ["rt_min", "rt", "average rt(min)", "retention_time", "rt(min)"],
+    "mz": ["mz", "m/z", "average mz", "precursor_mz", "row m/z", "mass (avg)", "mass"],
+    "rt": ["rt_min", "rt", "average rt(min)", "retention_time", "rt(min)", "row retention time", "rt (avg)"],
     "cluster": ["analytical_cluster_id", "cluster_id", "pcgroup", "feature_group"],
     "adduct": ["adduct_candidate", "adduct", "adduct type", "adduct_type"],
 }
@@ -78,6 +96,7 @@ class Dataset:
     istd: pd.DataFrame | None = None
     notes: list = field(default_factory=list)
     inferred: dict = field(default_factory=dict)
+    warnings: list = field(default_factory=list)    # things about the input worth a sentence in the summary
 
 
 # ---------------------------------------------------------------- names
@@ -92,7 +111,22 @@ def sample_stem(name):
 
 
 def _key(name):
-    return sample_stem(name).lower()
+    """Matching key of a sample name: 'AB 1_2B 101' and 'AB_1_2B_101.mzML' are the same injection."""
+    return re.sub(r"[^a-z0-9]+", "_", sample_stem(name).lower()).strip("_")
+
+
+def is_internal_standard(name, formula=None):
+    """Isotope-labelled or explicitly marked standards: '15:0-18:1(d7) PC', 'SM d9', 'x ISTD', formula with D."""
+    if formula is not None and not (isinstance(formula, float) and np.isnan(formula)):
+        if re.search(r"(?<![A-Za-z])D\d*(?![a-z])", re.sub(r"\s+", "", str(formula))) and \
+                re.fullmatch(r"(?:[A-Z][a-z]?\d*)+", re.sub(r"\s+", "", str(formula))):
+            return True
+    if name is None or (isinstance(name, float) and np.isnan(name)):
+        return False
+    text = str(name)
+    if re.search(r"(?i)w?vitamin", text):
+        return False
+    return bool(DEUTERIUM_RE.search(text) or ISTD_WORD_RE.search(text))
 
 
 def canonical_type(value):
@@ -133,13 +167,24 @@ def _group_from_name(stem):
 
 
 def infer_from_names(names):
-    """Sample type and group guessed from column names (P1_3 -> sample of group P1, QC1 -> qc, Blank_2 -> blank)."""
+    """Sample type and group guessed from column names (P1_3 -> sample of group P1, QC1 -> qc, Blank_2 -> blank).
+
+    Names like 'DA 12_1B 1207' (subject, time point, sample + extraction letter, run number) also give `_subject`
+    and the time point as the group."""
     rows = []
     for n in names:
         stem = sample_stem(n)
         t = _type_from_name(stem)
-        rows.append({"_type": t, "_group": _group_from_name(stem) if t == "sample" else None})
+        rows.append({"_type": t, "_group": _group_from_name(stem) if t == "sample" else None, "_subject": None})
     out = pd.DataFrame(rows, index=list(names))
+    st = list(out.index[out._type == "sample"])
+    hits = {n: DESIGN_NAME.match(" ".join(sample_stem(n).split())) for n in st}
+    if len(st) >= 4 and np.mean([m is not None for m in hits.values()]) >= 0.8:
+        for n, m in hits.items():
+            out.loc[n, "_group"] = m["g"] if m else None
+            out.loc[n, "_subject"] = m["s"] if m else None
+        out.attrs["design"] = True
+        return out
     groups = out.loc[out._type == "sample", "_group"]
     if groups.notna().sum() and groups.nunique() == groups.notna().sum():
         out["_group"] = None        # every sample its own "group": no grouping in the names
@@ -193,6 +238,20 @@ def _find_header_row(rows):
     return 0
 
 
+def _filled(cell):
+    return not (cell is None or (isinstance(cell, float) and np.isnan(cell)) or str(cell).strip() == "")
+
+
+def _title_rows(rows):
+    """Number of rows above the header that are a title or empty (one filled cell at most, table below wider)."""
+    width = [sum(_filled(c) for c in r) for r in rows[:15]]
+    if not width or max(width) < 2:
+        return 0
+    need = max(2, 0.5 * max(width))
+    first = next(i for i, w in enumerate(width) if w >= need)
+    return first if all(w <= 1 for w in width[:first]) else 0
+
+
 def _coerce_numeric(df):
     for c in df.columns:
         if df[c].dtype == object:
@@ -201,6 +260,40 @@ def _coerce_numeric(df):
             if nonnull.sum() and conv[nonnull].notna().mean() >= 0.95:
                 df[c] = conv
     return df
+
+
+def _sheet_table(raw):
+    rows = raw.values.tolist()
+    h = _find_header_row(rows)
+    block = [["" if pd.isna(c) else str(c) for c in r] for r in rows[:h]] if h else None
+    if not h:
+        h = _title_rows(rows)
+    df = raw.iloc[h + 1:].reset_index(drop=True)
+    df.columns = _unique_names(["" if pd.isna(c) else str(c).strip() for c in raw.iloc[h]])
+    df = df.replace({s: np.nan for s in NA_STRINGS if s})
+    df = df.dropna(how="all").reset_index(drop=True)       # e.g. the empty second header row of Profinder
+    return _coerce_numeric(df), block
+
+
+def read_tables(path):
+    """Every table of a file: [(sheet name or None, DataFrame, MS-DIAL header block or None)]; a workbook gives one
+    per non-empty sheet (a title row above the header is skipped)."""
+    if path.suffix.lower() not in (".xlsx", ".xls", ".xlsm"):
+        df, block = read_table(path)
+        return [(None, df, block)]
+    try:
+        sheets = pd.read_excel(path, sheet_name=None, header=None, dtype=object)
+    except Exception as e:  # noqa: BLE001 - any reader failure means an unreadable workbook for the owner
+        raise InputError(f"Nie mogę otworzyć {path.name}: {e}") from None
+    out = []
+    for name, raw in sheets.items():
+        if raw.shape[0] < 2 or raw.shape[1] < 1:
+            continue
+        df, block = _sheet_table(raw)
+        out.append((str(name), df, block))
+    if len(out) == 1:
+        out = [(None, out[0][1], out[0][2])]
+    return out
 
 
 def read_table(path):
@@ -213,17 +306,8 @@ def read_table(path):
             raise InputError(f"{path.name}: do czytania .parquet brakuje pakietu pyarrow – wyślij report.tsv "
                              "(DIA-NN zapisuje go obok) albo pg_matrix.tsv.") from None
     if suf in (".xlsx", ".xls", ".xlsm"):
-        try:
-            raw = pd.read_excel(path, sheet_name=0, header=None, dtype=object)
-        except Exception as e:  # noqa: BLE001 - any reader failure means an unreadable workbook for the owner
-            raise InputError(f"Nie mogę otworzyć {path.name}: {e}") from None
-        rows = raw.values.tolist()
-        h = _find_header_row(rows)
-        block = [["" if pd.isna(c) else str(c) for c in r] for r in rows[:h]] if h else None
-        df = raw.iloc[h + 1:].reset_index(drop=True)
-        df.columns = _unique_names(["" if pd.isna(c) else str(c) for c in raw.iloc[h]])
-        df = df.replace({s: np.nan for s in NA_STRINGS if s})
-        return _coerce_numeric(df), block
+        tabs = read_tables(path)
+        return (tabs[0][1], tabs[0][2]) if tabs else (pd.DataFrame(), None)
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         lines = [f.readline() for _ in range(40)]
     lines = [ln for ln in lines if ln]
@@ -233,12 +317,14 @@ def read_table(path):
     rows = list(csv.reader(lines, delimiter=sep))
     h = _find_header_row(rows)
     block = rows[:h] if h else None
+    if not h:
+        h = _title_rows(rows)
     try:
         df = pd.read_csv(path, sep=sep, skiprows=h, na_values=NA_STRINGS, keep_default_na=True, low_memory=False,
                          encoding="utf-8-sig", decimal="," if sep == ";" else ".")
     except (pd.errors.ParserError, UnicodeDecodeError, pd.errors.EmptyDataError):
         return pd.DataFrame(), None
-    return _coerce_numeric(df), block
+    return _coerce_numeric(df.dropna(how="all").reset_index(drop=True)), block
 
 
 def _unique_names(names):
@@ -366,6 +452,90 @@ def _matrix_msdial(df, block, notes):
     return X, feats, sheet
 
 
+def _profinder_blocks(columns):
+    """{tag: {sample: column}} for columns named like '[Area] sample' (Agilent Profinder / MassHunter MFE)."""
+    blocks = {}
+    for c in columns:
+        m = PROFINDER_TAG.match(str(c))
+        if m:
+            blocks.setdefault(m.group(1).strip(), {})[" ".join(m.group(2).split())] = c
+    return blocks
+
+
+def _profinder_quant(blocks):
+    for want in PROFINDER_QUANT:
+        for tag, cols in blocks.items():
+            if tag.lower() == want and len(cols) >= 2:
+                return tag
+    return None
+
+
+def _matrix_profinder(df, notes):
+    """Per-sample blocks [Mass] / [RT] / [Area|Height|Vol] / [Score]...: the intensity block is the matrix, the
+    summary columns (Name, Formula, Mass (avg), RT (avg)) describe the features."""
+    blocks = _profinder_blocks(df.columns)
+    tag = _profinder_quant(blocks)
+    cols = blocks[tag]
+    X = df[list(cols.values())].apply(pd.to_numeric, errors="coerce").astype(float)
+    X.columns = list(cols)
+    tagged = {c for b in blocks.values() for c in b.values()}
+    feats = df[[c for c in df.columns if c not in tagged and not df[c].isna().all()]].copy()
+    low = {str(c).strip().lower(): c for c in feats.columns}
+    mass = pd.to_numeric(feats[low["mass (avg)"]], errors="coerce") if "mass (avg)" in low else None
+    rt = pd.to_numeric(feats[low["rt (avg)"]], errors="coerce") if "rt (avg)" in low else None
+    ids = pd.Series([None] * len(df), index=df.index, dtype=object)
+    if mass is not None:
+        ids = mass.map("{:.4f}".format) + ("@" + rt.map("{:.2f}".format) if rt is not None else "")
+        ids = ids.where(mass.notna(), None)
+        notes.append("Profinder podaje masę neutralną (Mass) – w kolumnie mz i na wykresach to masa, nie m/z jonu")
+    if "name" in low:
+        name = feats[low["name"]]
+        ids = name.astype(str).str.strip().where(name.notna(), ids)
+    else:
+        notes.append("cechy bez nazw – identyfikator = masa@RT")
+    X.index = feats.index = ids.values
+    others = ", ".join(f"[{t}]" for t in blocks if t != tag)
+    notes.append(f"Profinder: macierz z bloku [{tag}] ({len(cols)} próbek); pominięte bloki: {others or 'brak'}")
+    return X, feats, f"Agilent Profinder ({tag})"
+
+
+def _mzmine_columns(columns):
+    """{sample file: column} of the MZmine quantity (area preferred), or None when this is not an MZmine export."""
+    low = {str(c).strip().lower() for c in columns}
+    for pattern, need in ((MZMINE_LEGACY, {"row id"}), (MZMINE_MODULAR, {"id"})):
+        if not need <= low:
+            continue
+        found = {}
+        for c in columns:
+            m = pattern.match(str(c).strip())
+            if m:
+                found.setdefault(m.group(2).lower(), {})[m.group(1).strip()] = c
+        for kind in ("area", "height"):
+            if len(found.get(kind, {})) >= 2:
+                return kind, found[kind]
+    return None
+
+
+def _matrix_mzmine(df, notes):
+    kind, cols = _mzmine_columns(df.columns)
+    X = df[list(cols.values())].apply(pd.to_numeric, errors="coerce").astype(float)
+    X.columns = list(cols)
+    low = {str(c).strip().lower(): c for c in df.columns}
+    idc = low.get("row id", low.get("id"))
+    quant = re.compile(r"(?i)^datafile:| Peak [\w/ ]+$")
+    feats = df[[c for c in df.columns if not quant.search(str(c)) and not df[c].isna().all()]].copy()
+    name = pd.Series([None] * len(df), index=df.index, dtype=object)
+    for c in df.columns:
+        lc = str(c).strip().lower()
+        if any(lc == k or lc.endswith(":" + k) for k in MZMINE_NAME_COLS) and not pd.api.types.is_numeric_dtype(df[c]):
+            name = name.where(name.notna(), df[c])
+    feats["name"] = name
+    ids = pd.to_numeric(df[idc], errors="coerce")
+    X.index = feats.index = [str(int(v)) if pd.notna(v) else None for v in ids]
+    notes.append(f"MZmine: macierz z kolumn Peak {kind} ({len(cols)} plików); 0 = niewykryte")
+    return X, feats, f"MZmine ({kind})"
+
+
 def _maybe_transposed(name, df):
     """Samples in rows (MetaboAnalyst style: Sample, Label/Group, feature columns)."""
     if any(h in name.lower() for h in META_HINTS):
@@ -396,17 +566,22 @@ def _match_fraction(keys, values):
     return np.mean([k in vals for k in keys]) if keys else 0.0
 
 
-def _find_sheet(X, tables):
+def _find_sheet(X, tables, group_col=""):
+    """The table with a column matching the matrix column names (best match; a tie goes to the table that also has
+    the group column, then to the first one)."""
     keys = [_key(c) for c in X.columns]
-    best = None
+    want = str(group_col or "").strip().lower()
+    best, best_rank = None, None
     for t in tables:
+        has_group = want in {str(c).strip().lower() for c in t["df"].columns}
         for c in t["df"].columns:
             col = t["df"][c]
             if pd.api.types.is_float_dtype(col):
                 continue
             frac = _match_fraction(keys, col.astype(str))
-            if frac >= 0.5 and (best is None or frac > best[0]):
-                best = (frac, t, c)
+            rank = (round(frac, 6), has_group)
+            if frac >= 0.5 and (best is None or rank > best_rank):
+                best, best_rank = (frac, t, c), rank
     return best
 
 
@@ -415,9 +590,69 @@ def _string_like(col):
     return len(s) >= 2 and s.str.contains(r"[A-Za-z]").mean() > 0.5
 
 
+def _shared_key(sheet, df):
+    """Join key by shared column names: one column whose values are (nearly) unique in `df`, otherwise two columns
+    that are unique together (Donor_ID + Timepoint). Returns (sheet columns, df columns) or None."""
+    left = {str(c).strip().lower(): c for c in sheet.columns if not str(c).startswith("_")}
+    right = {str(c).strip().lower(): c for c in df.columns}
+    shared = [k for k in left if k in right and k]
+    if not shared:
+        return None
+
+    def rows(frame, cols):
+        every = zip(*[frame[c].tolist() for c in cols], strict=True)
+        return [tuple(str(v).strip() for v in r) for r in every if not any(pd.isna(v) for v in r)]
+
+    def match(keys):
+        lt, rt = rows(sheet, [left[k] for k in keys]), rows(df, [right[k] for k in keys])
+        if not lt or not rt:
+            return 0.0, 1.0
+        seen = set(rt)
+        return float(np.mean([r in seen for r in lt])), 1 - len(seen) / len(rt)
+
+    best = None
+    for k in shared:
+        frac, dup = match([k])
+        if frac >= 0.5 and dup <= 0.1 and (best is None or frac > best[0]):
+            best = (frac, [k])
+    if best is None:
+        for i, a in enumerate(shared):
+            for b in shared[i + 1:]:
+                frac, dup = match([a, b])
+                if frac >= 0.5 and dup == 0 and (best is None or frac > best[0]):
+                    best = (frac, [a, b])
+    if best is None:
+        return None
+    return [left[k] for k in best[1]], [right[k] for k in best[1]]
+
+
 def _merge_secondary(sheet, tables, notes):
     for t in tables:
         df = t["df"]
+        key = _shared_key(sheet, df)
+        if key is not None:
+            lcols, rcols = key
+            def joined(frame, cols):
+                rows = zip(*[frame[c].tolist() for c in cols], strict=True)
+                return [None if any(pd.isna(v) for v in r) else " + ".join(str(v).strip() for v in r) for r in rows]
+
+            rk = joined(df, rcols)
+            ok = [k is not None for k in rk]
+            right = df[ok].copy()
+            right.index = pd.Index([k for k in rk if k is not None], dtype=object)
+            dup = right.index.duplicated()
+            if dup.any():
+                which = ", ".join(sorted(set(right.index[dup]))[:3])
+                notes.append(f"{t['name']}: powtórzony klucz {which} – wzięto pierwszy wiersz")
+                right = right[~dup]
+            add = [c for c in right.columns if c not in sheet.columns and not right[c].isna().all()]
+            mapped = right.reindex(pd.Index(joined(sheet, lcols), dtype=object))[add]
+            mapped.index = sheet.index
+            sheet = pd.concat([sheet, mapped], axis=1)
+            t["used"] = t["secondary"] = True
+            notes.append(f"dołączono {t['name']} do arkusza próbek po kolumnie {' + '.join(map(str, lcols))} "
+                         f"({', '.join(map(str, add[:6]))}{'…' if len(add) > 6 else ''})")
+            continue
         best = None
         for cu in df.columns:
             if not _string_like(df[cu]) or not df[cu].dropna().astype(str).is_unique:
@@ -441,8 +676,115 @@ def _merge_secondary(sheet, tables, notes):
         mapped.index = sheet.index
         sheet = pd.concat([sheet, mapped], axis=1)
         t["used"] = t["secondary"] = True     # may serve the next layer's sheet too (subjects.csv)
-        notes.append(f"dołączono {t['path'].name} do arkusza próbek po kolumnie {cs} ({', '.join(map(str, add[:6]))}"
+        notes.append(f"dołączono {t['name']} do arkusza próbek po kolumnie {cs} ({', '.join(map(str, add[:6]))}"
                      f"{'…' if len(add) > 6 else ''})")
+    return sheet
+
+
+# ---------------------------------------------------------------- design read from sample names
+
+def _name_tokens(name):
+    return [t for t in re.split(r"[^A-Za-z0-9]+", sample_stem(name)) if t]
+
+
+def _name_rule(names, values, min_rows=6, min_support=1.5, min_consistency=0.9):
+    """Which part of the sample names tells a sheet column (Donor_ID = 1st token, Timepoint = 'M' + 2nd token)?
+
+    Learned from the samples that have a value: per kind of name (QC/blank/sample, number of tokens) the token
+    position whose tokens map to the column values consistently. Returns a function name -> value or None."""
+    rules = {}
+    known = [(n, str(v)) for n, v in zip(names, values, strict=True) if pd.notna(v)]
+    kinds = {}
+    for n, v in known:
+        tok = _name_tokens(n)
+        kinds.setdefault((_type_from_name(sample_stem(n)), len(tok)), []).append((tok, v))
+    for kind, rows in kinds.items():
+        if len(rows) < min_rows or len({v for _, v in rows}) < 2:
+            continue
+        best = None
+        for i in range(kind[1]):
+            by_tok = {}
+            for tok, v in rows:
+                by_tok.setdefault(tok[i].lower(), []).append(v)
+            if len(rows) / len(by_tok) < min_support:
+                continue
+            major = {k: max(set(vs), key=vs.count) for k, vs in by_tok.items()}
+            cons = np.mean([major[tok[i].lower()] == v for tok, v in rows])
+            if cons >= min_consistency and (best is None or cons > best[0]):
+                best = (cons, i, major)
+        if best is None:
+            continue
+        _, i, major = best
+        frames = set()
+        for k, v in major.items():
+            at = v.lower().find(k)
+            frames.add((v[:at], v[at + len(k):]) if at >= 0 else None)
+        frame = frames.pop() if len(frames) == 1 else None      # one prefix/suffix around the token for all values
+        rules[kind] = (i, major, frame)
+
+    def rule(name):
+        tok = _name_tokens(name)
+        r = rules.get((_type_from_name(sample_stem(name)), len(tok)))
+        if r is None:
+            return None
+        i, major, frame = r
+        if tok[i].lower() in major:
+            return major[tok[i].lower()]
+        return frame[0] + tok[i] + frame[1] if frame is not None else None
+
+    return rule if rules else None
+
+
+def _near_matches(columns, free_keys):
+    """Matrix columns without a sheet row vs sheet rows without a column: the same first token and the same run
+    number at the end ('AB 1_2A 107' and 'AB_1_1A_107.mzML') is the same file described differently."""
+    out, taken = {}, set()
+    for c in columns:
+        tc = _key(c).split("_")
+        if len(tc) < 3 or not re.fullmatch(r"\d{2,}", tc[-1]):
+            continue
+        cand = [k for k in free_keys if k not in taken and (tk := k.split("_")) and len(tk) == len(tc)
+                and tk[0] == tc[0] and tk[-1] == tc[-1]]
+        if len(cand) == 1:
+            out[c] = cand[0]
+            taken.add(cand[0])
+    return out
+
+
+def _fill_from_names(sheet, columns, match, notes, warnings, inferred, done):
+    """Design columns (group, subject/pair, batch) for samples the sheet does not describe, read from their names
+    by rules learned on the described ones; disagreements between a name and its sheet row are reported."""
+    exact = [n for n in sheet.index if match.get(n) == "exact"]
+    loose = [n for n in sheet.index if match.get(n) != "exact"]
+    filled = set(inferred.get("from_names_samples", []))
+    for col in columns:
+        if col is None or col not in sheet.columns or col in done:
+            continue
+        rule = _name_rule(exact, sheet.loc[exact, col])
+        if rule is None:
+            continue
+        done.add(col)
+        differ = [n for n in exact if pd.notna(sheet.loc[n, col]) and rule(n) is not None
+                  and rule(n) != str(sheet.loc[n, col])]
+        if differ:
+            warnings.append(f"arkusz i nazwa pliku mówią co innego o {col}: "
+                            + "; ".join(f"{n}: arkusz {sheet.loc[n, col]}, nazwa {rule(n)}" for n in differ[:3])
+                            + ("…" if len(differ) > 3 else "") + " (użyto arkusza)")
+        got = []
+        if sheet[col].dtype != object:
+            sheet[col] = sheet[col].astype(object)
+        for n in loose + [n for n in exact if pd.isna(sheet.loc[n, col])]:
+            v = rule(n)
+            if v is not None and (match.get(n) != "exact" or pd.isna(sheet.loc[n, col])):
+                if pd.isna(sheet.loc[n, col]) or str(sheet.loc[n, col]) != v:
+                    sheet.loc[n, col] = v
+                    got.append(n)
+        if got:
+            filled.update(got)
+            notes.append(f"{col} z nazw plików dla {len(got)} próbek bez (zgodnego) wiersza w arkuszu: "
+                         + ", ".join(map(str, got[:8])) + ("…" if len(got) > 8 else ""))
+    inferred["from_names_samples"] = sorted(filled)
+    inferred["from_names"] = len(filled)
     return sheet
 
 
@@ -495,7 +837,7 @@ def standardize_features(feats, X):
 def _layer_of(source, fname, feats, X):
     if source.startswith("DIA-NN"):
         return "proteomics"
-    if source == "MS-DIAL":
+    if source == "MS-DIAL" or source.startswith(("Agilent Profinder", "MZmine")):
         return "metabolomics"
     low = fname.lower()
     if "prot" in low:
@@ -514,7 +856,15 @@ def _layer_of(source, fname, feats, X):
 
 # ---------------------------------------------------------------- samples
 
-def build_samples(X, sheet, group_col, notes, inferred):
+def _resolve(low, wanted, aliases):
+    """Sheet column for a parameter value (case-insensitive) or the first known alias; None when absent."""
+    key = str(wanted or "").strip().lower()
+    if key and key in low:
+        return low[key]
+    return _pick(low, aliases)
+
+
+def build_samples(X, sheet, group_col, notes, inferred, pair_col=""):
     """Canonical sample columns from the sheet (when there is one) or the column names."""
     names = list(X.columns)
     guess = infer_from_names(names)
@@ -557,6 +907,9 @@ def build_samples(X, sheet, group_col, notes, inferred):
         out["_group"] = guess["_group"]
         inferred["group"] = True
         inferred["group_col"] = None
+        if guess.attrs.get("design"):
+            notes.append("z nazw plików (wzór: osoba grupa_próbka+litera numer): osoba, grupa (punkt czasowy) i "
+                         "replikaty ekstrakcji")
     out.loc[~out._type.isin(["sample", "replicate"]), "_group"] = None
 
     ocol = _pick(low, ORDER_ALIASES)
@@ -564,16 +917,52 @@ def build_samples(X, sheet, group_col, notes, inferred):
     if order is not None and order.notna().mean() > 0.8:
         out["_order"] = order.astype(float)
         inferred["order"] = False
+        gaps = out["_order"].isna()
+        if gaps.any():      # injections the sequence does not list: after the last known one, in column order
+            out.loc[gaps, "_order"] = out["_order"].max() + np.arange(1, int(gaps.sum()) + 1)
+            notes.append(f"{int(gaps.sum())} iniekcji bez kolejności w arkuszu – dopisane na końcu: "
+                         + ", ".join(map(str, out.index[gaps][:8])))
     else:
         out["_order"] = np.arange(1, len(names) + 1, dtype=float)
         inferred["order"] = True
     bcol = _pick(low, BATCH_ALIASES)
     if bcol is not None and out[bcol].notna().any():
-        out["_batch"] = out[bcol].astype(str).where(out[bcol].notna(), "?")
+        batch = out[bcol].astype(object).where(out[bcol].notna())
+        for other in (low[a] for a in BATCH_ALIASES if a in low and low[a] != bcol):
+            both = out[[bcol, other]].dropna().astype(str).drop_duplicates()
+            if batch.isna().any() and len(both) and both[other].is_unique:      # day7 always goes with Batch_7
+                lookup = dict(zip(both[other], both[bcol], strict=True))
+                fill = out[other].map(lambda v, m=lookup: m.get(str(v)))
+                n_fill = int((batch.isna() & fill.notna()).sum())
+                if n_fill:
+                    batch = batch.where(batch.notna(), fill)
+                    notes.append(f"partia uzupełniona z kolumny {other} dla {n_fill} iniekcji")
+        out["_batch"] = batch.map(lambda v: "?" if pd.isna(v) else str(v))
+        if (out["_batch"] == "?").any():
+            notes.append(f"{int((out['_batch'] == '?').sum())} iniekcji bez partii (partia „?” – bez korekty partii)")
     else:
         out["_batch"] = "1"
     scol = _pick(low, SUBJECT_ALIASES)
-    out["_subject"] = out[scol].astype(object).where(out[scol].notna()) if scol is not None else None
+    if scol is not None:
+        out["_subject"] = out[scol].astype(object).where(out[scol].notna())
+    else:
+        out["_subject"] = guess["_subject"] if guess.attrs.get("design") else None
+    want = str(pair_col or "").strip()
+    if not want:
+        out["_pair"] = None
+    elif want.lower() in low:
+        pc = low[want.lower()]
+        out["_pair"] = out[pc].astype(object).where(out[pc].notna())
+        inferred["pair_col"] = str(pc)
+    elif sheet is None and guess.attrs.get("design"):
+        out["_pair"] = guess["_subject"]
+        inferred["pair_col"] = "osoba z nazw plików"
+        notes.append(f"pair={want}: brak arkusza próbek – parą jest osoba odczytana z nazw plików")
+    else:
+        raise InputError(f"Nie ma kolumny pair={want}" + (" w arkuszu próbek. Kolumny: " + ", ".join(
+            str(c) for c in sheet.columns if not str(c).startswith("_"))[:400] if sheet is not None
+            else " – bez arkusza próbek nie wiem, które próbki tworzą parę (dodaj arkusz z tą kolumną)."))
+    out.loc[~out._type.isin(["sample", "replicate"]), "_pair"] = None
     return out
 
 
@@ -624,22 +1013,23 @@ def _rename_samples(X, sheet):
     return X, sheet, files
 
 
-def load_datasets(workdir, group_col="group", layer="auto"):
+def load_datasets(workdir, group_col="group", layer="auto", pair_col=""):
     files = collect_files(workdir)
     if not files:
         raise InputError("Nie widzę żadnej tabeli (csv/tsv/txt/xlsx/parquet ani zipa z nimi).")
     tables = []
     for p in files:
-        df, block = read_table(p)
-        if df.shape[0] == 0 or df.shape[1] < 2:
-            continue
-        tables.append({"path": p, "df": df, "block": block, "used": False})
+        for sheet_name, df, block in read_tables(p):
+            if df.shape[0] == 0 or df.shape[1] < 2:
+                continue
+            tables.append({"path": p, "name": p.name if sheet_name is None else f"{p.name}[{sheet_name}]",
+                           "df": df, "block": block, "used": False})
     if not tables:
         raise InputError("Pliki nie wyglądają na tabele: " + ", ".join(p.name for p in files[:5]))
 
     found = []
     for t in tables:
-        df, name, notes = t["df"], t["path"].name, []
+        df, name, notes = t["df"], t["name"], []
         cols = set(df.columns)
         sheet = None
         if "Run" in cols and cols & {"Protein.Group", "Genes"} and cols & set(DIANN_QUANT):
@@ -647,6 +1037,10 @@ def load_datasets(workdir, group_col="group", layer="auto"):
             src = "DIA-NN raport (format długi)"
         elif "Protein.Group" in cols or {"Genes", "N.Sequences"} <= cols:
             X, feats, src = _matrix_diann(df, notes)
+        elif _profinder_quant(_profinder_blocks(df.columns)) is not None:
+            X, feats, src = _matrix_profinder(df, notes)
+        elif _mzmine_columns(df.columns) is not None:
+            X, feats, src = _matrix_mzmine(df, notes)
         elif t["block"] is not None or "Alignment ID" in cols:
             X, feats, sheet = _matrix_msdial(df, t["block"], notes)
             src = "MS-DIAL"
@@ -670,7 +1064,7 @@ def load_datasets(workdir, group_col="group", layer="auto"):
     for f in sorted(found, key=lambda f: -f["X"].size):
         host = next((m for m in mains if f["X"].shape[0] < max(100, 0.1 * m["X"].shape[0])
                      and _match_fraction([_key(c) for c in m["X"].columns], f["X"].columns) >= 0.8), None)
-        if host is not None and (any(h in f["t"]["path"].name.lower() for h in IS_HINTS)
+        if host is not None and (any(h in f["t"]["name"].lower() for h in IS_HINTS)
                                  or f["X"].shape[0] <= 30):
             is_tables[id(host)] = f
             f["t"]["used"] = True
@@ -685,28 +1079,50 @@ def load_datasets(workdir, group_col="group", layer="auto"):
         notes = list(m["notes"])
         inferred = {}
         X = _clean_matrix(m["X"], notes)
+        if len(m["feats"]) == len(X):       # row for row the same features: follow the cleaned (unique) IDs
+            m["feats"] = m["feats"].copy()
+            m["feats"].index = X.index
         sheet = m["sheet"]
         sheet_from = "plik" if sheet is not None else None
-        best = _find_sheet(X, [t for t in others if t["path"] != m["t"]["path"]])
+        best = _find_sheet(X, [t for t in others if t is not m["t"]], group_col)
+        match = {}
         if best is not None:
             frac, t, c = best
             df = t["df"].copy()
             df["_k"] = df[c].map(_key)
-            df = df.drop_duplicates("_k").set_index("_k")
-            ext = df.reindex([_key(x) for x in X.columns]).drop(columns=[], errors="ignore")
+            df = df[df[c].notna()].drop_duplicates("_k").set_index("_k")
+            keys = [_key(x) for x in X.columns]
+            ext = df.reindex(keys).drop(columns=[], errors="ignore")
             ext.index = X.columns
+            match = {x: "exact" for x, k in zip(X.columns, keys, strict=True) if k in df.index}
+            near = _near_matches([x for x in X.columns if x not in match], [k for k in df.index if k not in keys])
+            for x, k in near.items():
+                ext.loc[x] = df.loc[k]
+                match[x] = "near"
+            if near:
+                warns = m.setdefault("warnings", [])
+                warns.append(f"{len(near)} plików dopasowano do arkusza tylko po numerze na końcu nazwy (opis w "
+                             "arkuszu jest inny, grupę/osobę wzięto z nazwy pliku): "
+                             + "; ".join(f"{x} ↔ {df.loc[k, c]}" for x, k in list(near.items())[:4])
+                             + ("…" if len(near) > 4 else ""))
+            unused_rows = [str(df.loc[k, c]) for k in df.index if k not in keys and k not in near.values()]
+            if unused_rows:
+                notes.append(f"{len(unused_rows)} wierszy arkusza bez kolumny w macierzy: "
+                             + ", ".join(unused_rows[:6]) + ("…" if len(unused_rows) > 6 else ""))
             if sheet is not None:
                 sheet.index = X.columns
                 ext = pd.concat([ext, sheet[[k for k in sheet.columns if k not in ext.columns]]], axis=1)
             sheet = ext
             t["used"] = True
-            t["sheet_of"] = m["t"]["path"].name
-            sheet_from = t["path"].name
-            missing = int(df.reindex([_key(x) for x in X.columns]).isna().all(axis=1).sum())
-            notes.append(f"arkusz próbek: {t['path'].name} (kolumna {c}, dopasowano {frac:.0%} próbek)")
-            if missing:
-                notes.append(f"{missing} próbek bez wiersza w arkuszu")
+            t["sheet_of"] = m["t"]["name"]
+            sheet_from = t["name"]
+            lost = [x for x in X.columns if x not in match]
+            notes.append(f"arkusz próbek: {t['name']} (kolumna {c}, dopasowano {len(match)}/{X.shape[1]} próbek)")
+            if lost:
+                notes.append(f"{len(lost)} próbek bez wiersza w arkuszu: " + ", ".join(map(str, lost[:8]))
+                             + ("…" if len(lost) > 8 else ""))
         m["sheet_final"], m["sheet_from"], m["Xc"], m["notes2"], m["inferred"] = sheet, sheet_from, X, notes, inferred
+        m["match"] = match
 
     remaining = [t for t in tables if not t["used"]]
     for m in mains:
@@ -720,15 +1136,29 @@ def load_datasets(workdir, group_col="group", layer="auto"):
             feats = pd.concat([feats.reindex(X.index), df.reindex(X.index).drop(
                 columns=[k for k in df.columns if k in feats.columns])], axis=1)
             t["used"] = True
-            notes.append(f"opis cech: {t['path'].name} ({frac:.0%} cech)")
+            notes.append(f"opis cech: {t['name']} ({frac:.0%} cech)")
         sheet = m["sheet_final"]
+        warnings = m.setdefault("warnings", [])
         if sheet is not None:
+            sheet.index = X.columns
+            match, done = m["match"], set()
+
+            def design_cols(sh):
+                low = {str(c).strip().lower(): c for c in sh.columns if not str(c).startswith("_")}
+                return [_resolve(low, group_col, GROUP_ALIASES), _resolve(low, pair_col, SUBJECT_ALIASES),
+                        _pick(low, BATCH_ALIASES)]
+
+            partial = len(match) < X.shape[1] or "near" in match.values()
+            if partial or sheet[[c for c in design_cols(sheet) if c is not None]].isna().any().any():
+                sheet = _fill_from_names(sheet, design_cols(sheet), match, notes, warnings, inferred, done)
             sec = [t for t in remaining if (not t["used"] or t.get("secondary")) and "sheet_of" not in t]
             sheet = _merge_secondary(sheet, sec, notes)
+            if partial:
+                sheet = _fill_from_names(sheet, design_cols(sheet), match, notes, warnings, inferred, done)
         X2, sheet, files = _rename_samples(X, sheet)
         if sheet is not None:
             sheet.index = X2.columns
-        samples = build_samples(X2, sheet, group_col, notes, inferred)
+        samples = build_samples(X2, sheet, group_col, notes, inferred, pair_col=pair_col)
         samples["_file"] = files
         feats = standardize_features(feats, X2)
         istd = None
@@ -740,12 +1170,22 @@ def load_datasets(workdir, group_col="group", layer="auto"):
                 std.columns = stems
             istd = std.reindex(columns=X2.columns)
             istd = istd.where(istd > 0)
-            notes.append(f"wzorce wewnętrzne: {f['t']['path'].name} ({istd.shape[0]} wzorców)")
-        lay = _layer_of(m["src"], m["t"]["path"].name, feats, X2)
-        datasets.append(Dataset(name=m["t"]["path"].name, layer=lay, source=m["src"], X=X2, features=feats,
-                                samples=samples, istd=istd, notes=notes, inferred=inferred))
+            notes.append(f"wzorce wewnętrzne: {f['t']['name']} ({istd.shape[0]} wzorców)")
+        lay = _layer_of(m["src"], m["t"]["name"], feats, X2)
+        if istd is None and lay == "metabolomics":
+            formula = feats["formula"] if "formula" in feats else pd.Series(None, index=feats.index)
+            std = pd.Series([is_internal_standard(n, f) for n, f in zip(feats["name"], formula, strict=True)],
+                            index=X2.index)
+            if std.any() and not std.all():
+                istd = X2[std].where(X2[std] > 0)
+                X2, feats = X2[~std], feats[~std]
+                notes.append(f"wzorce wewnętrzne: {int(std.sum())} cech rozpoznanych po nazwie/wzorze (znakowane "
+                             "izotopowo) – wyjęte z macierzy przed filtrami, służą do kontroli iniekcji i dryfu: "
+                             + ", ".join(map(str, istd.index[:8])) + ("…" if std.sum() > 8 else ""))
+        datasets.append(Dataset(name=m["t"]["name"], layer=lay, source=m["src"], X=X2, features=feats,
+                                samples=samples, istd=istd, notes=notes, inferred=inferred, warnings=warnings))
 
-    unused = [t["path"].name for t in tables if not t["used"]]
+    unused = [t["name"] for t in tables if not t["used"] and not NOT_A_TABLE.search(t["name"])]
     if unused:
         for d in datasets:
             d.notes.append("nieużyte pliki: " + ", ".join(unused[:6]))

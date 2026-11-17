@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -23,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import VERSION, actions, jobs
+from . import VERSION, actions, examples, guide, jobs, links
 from .recipes import RECIPES, ParamError, quick_values
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
@@ -121,9 +122,33 @@ class App:
         try:
             state = json.loads((self.store.root / "bot.json").read_text())
         except (OSError, ValueError):
-            return {}
-        return {token: d for token, d in state.get("drafts", {}).items()
-                if d.get("recipe") and not (self.store.root / "staging" / token / actions.CLOSED).exists()}
+            state = {}
+        staging = self.store.root / "staging"
+        found = dict(state.get("drafts", {}))
+        for own in staging.glob("*/draft.json"):  # cards made here (examples): ours to write, bot.json is the bot's
+            try:
+                found[own.parent.name] = json.loads(own.read_text())
+            except ValueError:
+                pass
+        return {token: d for token, d in found.items()
+                if d.get("recipe") and not (staging / token / actions.CLOSED).exists()}
+
+    def example_draft(self, name):
+        example = examples.EXAMPLES.get(name)
+        if example is None:
+            raise LookupError
+        for token, draft in self.drafts().items():  # a second tap opens the card that is already waiting
+            if draft.get("name") == example.name and (self.store.root / "staging" / token / "draft.json").exists():
+                return {"token": token}
+        token = str(int(self.clock() * 1000))
+        folder = self.store.root / "staging" / token
+        folder.mkdir(parents=True)
+        for rel, data in example.files().items():
+            (folder / rel).write_bytes(data)
+        RECIPES[example.recipe].validate(example.typed)
+        jobs.write_json(folder / "draft.json", {"recipe": example.recipe, "name": example.name,
+                                                "params": dict(example.typed), "fetch": []})
+        return {"token": token}
 
     # --- routing --------------------------------------------------------------------------------------
 
@@ -133,6 +158,8 @@ class App:
             return self.state()
         if parts == ["recipes"]:
             return recipes_json()
+        if parts == ["guide"]:
+            return [topic._asdict() for topic in guide.TOPICS]
         if parts == ["drafts"]:
             return self.drafts()
         job = self.job_id(parts)
@@ -152,6 +179,8 @@ class App:
         if parts == ["hold"]:
             self.store.set_hold(bool(body.get("on")))
             return {"hold": self.store.hold}
+        if len(parts) == 3 and parts[0] == "examples" and parts[2] == "draft":
+            return self.example_draft(parts[1])
         if parts == ["cleanup"]:
             old = actions.old_finished(self.store, float(body.get("days", 7)), self.clock())
             for job in old:
@@ -177,6 +206,15 @@ class App:
             return {"ok": True}
         if action == "retry":
             return {"id": actions.retry(self.store, job, body.get("params") or None).id}
+        if action == "script":
+            name, data = actions.script_zip(self.store, job)
+            self.send_document(name, data, f"📝 #{job} jako skrypt: zmień .mdp albo run.sh i odeślij ten zip.")
+            return {"ok": True}
+        if action == "link":
+            rel = str(body.get("path", ""))
+            if self.store.result_file(job, rel) is None:
+                raise LookupError
+            return {"url": "/dl/" + links.make(self.token, job, rel, self.clock() + links.DAY)}
         if action == "send":
             found = self.store.result_file(job, str(body.get("path", "")))
             if found is None or found.stat().st_size > MAX_FILE:
@@ -260,7 +298,41 @@ def make_server(app, host, port):
             except ValueError:
                 return self.reply(HTTPStatus.BAD_REQUEST, {"error": "zła treść zapytania"})
 
+        def download(self):
+            """A signed link from the bot (links.py): the file as an attachment, resumable with Range."""
+            address = self.address()
+            if app.blocked(address):
+                return self.reply(HTTPStatus.TOO_MANY_REQUESTS)
+            found = links.parse(app.token, self.path[len("/dl/"):].split("?")[0], app.clock())
+            path = app.store.result_file(*found) if found and found[0] in app.store.ids() else None
+            if path is None:
+                app.failed(address)
+                return self.reply(HTTPStatus.NOT_FOUND)
+            size = path.stat().st_size
+            start = 0
+            match = re.fullmatch(r"bytes=(\d+)-", self.headers.get("Range") or "")
+            if match and int(match[1]) < size:
+                start = int(match[1])
+            self.send_response(HTTPStatus.PARTIAL_CONTENT if start else HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(size - start))
+            self.send_header("Accept-Ranges", "bytes")
+            if start:
+                self.send_header("Content-Range", f"bytes {start}-{size - 1}/{size}")
+            name = urllib.parse.quote(path.name)
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{name}; filename=\"{path.name}\"")
+            self.end_headers()
+            with open(path, "rb") as source:
+                source.seek(start)
+                while chunk := source.read(1024 * 1024):
+                    try:
+                        self.wfile.write(chunk)
+                    except OSError:
+                        return  # the browser went away; it can resume with Range
+
         def do_GET(self):
+            if self.path.startswith("/dl/"):
+                return self.download()
             if self.path.startswith("/api/"):
                 return self.handle_api("GET")
             if urllib.parse.urlparse(self.path).path in ("/", "/index.html"):

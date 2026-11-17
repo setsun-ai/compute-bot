@@ -4,6 +4,9 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Commands below run as user compute (sudo -u), which may not enter the folder this was started from (a home
+# directory is usually closed to others): micromamba then fails with "cannot set current path". Start from /.
+cd /
 OPT=/opt/compute-bot
 HOME_DIR=/var/lib/compute-bot
 ENV_PREFIX=$HOME_DIR/env
@@ -58,6 +61,11 @@ echo "Środowisko obliczeniowe (GROMACS, RDKit, Vina, scikit-learn...). Pierwszy
 export MAMBA_ROOT_PREFIX=$HOME_DIR/mamba
 # micromamba writes the pip part next to the yml, so it must sit where the compute user can write.
 install -o compute -g compute -m 600 "$OPT/app/deploy/environment.yml" "$HOME_DIR/environment.yml"
+if [ -d "$ENV_PREFIX" ] && [ ! -d "$ENV_PREFIX/conda-meta" ]; then
+  # Left by an earlier run that broke off; micromamba won't create an environment over it.
+  echo "Usuwam niedokończone środowisko z poprzedniej próby..."
+  rm -rf "$ENV_PREFIX"
+fi
 if [ -d "$ENV_PREFIX/conda-meta" ]; then
   sudo -u compute env MAMBA_ROOT_PREFIX="$MAMBA_ROOT_PREFIX" "$MM" env update -y -q -p "$ENV_PREFIX" \
     -f "$HOME_DIR/environment.yml"

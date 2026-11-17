@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.1 (2026-11)
+
+- **Nietypowe ustawienia MD:** `T_eq=` (temperatura równowagowania), `mdp=` dla każdego etapu z przedrostkiem
+  (`nvt:tau_t=1.0 1.0;md:dt=0.001`), a `/skrypt N` (📝 przy wynikach) oddaje zadanie jako zip z plikami `.mdp` i
+  `run.sh` – zmieniasz, odsyłasz, liczy się z Twoimi ustawieniami. Działa dla zadań md liczonych od tej wersji.
+
+## 0.2.0 (2026-11)
+
+- **Przewodnik** (`/guide`, 📖 w panelu, `docs/przewodnik.md`): pierwsze kroki, dynamika, QSAR, omika, dokowanie,
+  CHARMM-GUI/NAMD, skrypty, wyniki, praca zdalna, rozwiązywanie problemów – z przykładami „Wypróbuj”.
+- **Duże wyniki:** link do pobrania ważny 24 h (wznawialny), polecenie `scp`, a bez Tailscale kawałki po 45 MB
+  (`/get N plik czesci`).
+- **Lipidomika w `omics`:** tabele z Profindera/MFE i MZmine 3, projekt sparowany (`pair=`, Wilcoxon dla par),
+  uśrednianie replikatów technicznych, klasy lipidów z nazw, KMD, Van Krevelen, RT vs m/z, Venn.
+- Bot sam pisze o nowej wersji (raz, z przyciskiem instalacji); `/start` wita przewodnikiem i przykładem.
+- Panel: przewodnik, przykłady, pobieranie dużych plików.
+
+## 0.1.3 (2026-11)
+
+- **Instalator działa z katalogu domowego.** Uruchomiony z `~/Documents/...` padał na
+  `critical libmamba … cannot set current path: Permission denied`: micromamba jako użytkownik `compute` nie mogła
+  wejść do zamkniętego katalogu, z którego wystartował instalator. Teraz instalator zaczyna od `/`.
+- **Ponowne uruchomienie po nieudanej próbie** usuwa niedokończone środowisko (katalog bez `conda-meta`), zamiast
+  utknąć na nim.
+
 ## 0.1.2 (2026-11)
 
 - **Starsze paczki CHARMM-GUI z OpenMM 8:** minimalizacja w skryptach sprzed OpenMM 8 podawała tolerancję w

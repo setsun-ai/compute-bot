@@ -170,6 +170,26 @@ input:focus, select:focus { border-color: var(--btn); }
 #ov pre { color: #eee; }
 #ov .btn.ghost { background: rgba(255,255,255,.14); color: #fff; }
 .back { margin: 0 4px 8px; }
+.h1row { display: flex; align-items: center; gap: 8px; }
+.h1row h1 { flex: 1; min-width: 0; }
+.h1row .btn { flex: none; }
+.h1row .btn.ghost { background: var(--section); }
+.help { flex: none; width: 30px; height: 30px; border-radius: 50%; border: 0; padding: 0; background: var(--section); color: var(--link); font-weight: 700; font-size: 16px; }
+.start { text-align: center; padding: 22px 16px 18px; }
+.start .e { font-size: 40px; display: block; }
+.start h2 { margin: 6px 0 4px; font-size: 19px; }
+.start p { margin: 0 0 14px; color: var(--hint); }
+.start .btn { width: 100%; padding: 12px 14px; font-size: 16px; }
+.guide { font-size: 16px; line-height: 1.58; white-space: pre-wrap; word-break: break-word; padding: 14px; }
+.guide b { font-weight: 650; }
+.guide code { font: 14px/1.4 var(--mono); background: var(--sec); color: var(--text); padding: 2px 6px; border-radius: 6px; cursor: pointer; -webkit-box-decoration-break: clone; box-decoration-break: clone; }
+.guide pre { font: 13px/1.5 var(--mono); background: var(--sec); padding: 10px 12px; border-radius: 9px; margin: 6px 0; white-space: pre; word-break: normal; overflow-x: auto; cursor: pointer; }
+.guide pre code { background: none; padding: 0; font: inherit; }
+.guide code:active, .guide pre:active { opacity: .6; }
+.guide .copied { outline: 2px solid var(--btn); outline-offset: 1px; }
+.dl { padding: 0 12px 12px; }
+.dl .url { font: 12px/1.4 var(--mono); word-break: break-all; background: var(--sec); border-radius: 8px; padding: 8px 10px; -webkit-user-select: all; user-select: all; }
+.dl .btns { padding: 8px 0 4px; }
 .center { text-align: center; padding: 50px 20px; }
 .center .e { font-size: 52px; }
 </style>
@@ -275,10 +295,25 @@ function size(b) {
   return `${pl(b >= 100 ? Math.round(b) : b.toFixed(1))} ${u[i]}`;
 }
 let toastTimer;
-function toast(msg, bad) {
+function toast(msg, bad, ms) {
   const t = $('#toast');
   t.textContent = msg; t.className = 'show' + (bad ? ' bad' : '');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ''; }, 3200);
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.className = ''; }, ms || 3200);
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* brak API albo zgody: stary sposób niżej */ }
+  const ta = document.createElement('textarea');
+  ta.value = text; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.select();
+  let ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { /* nie da się */ }
+  ta.remove();
+  return ok;
+}
+async function copyTap(text, el) {
+  if (!await copyText(text)) { haptic('error'); return toast('Kopiowanie niedostępne – przytrzymaj tekst.', true); }
+  haptic('success'); toast('📋 skopiowano', false, 1200);
+  if (el) { el.classList.add('copied'); setTimeout(() => el.classList.remove('copied'), 700); }
 }
 
 // ---------- API ----------------------------------------------------------------------------------------------------
@@ -322,6 +357,12 @@ async function recipes() {
   if (!recipesCache) recipesCache = await api('GET', '/api/recipes');
   return recipesCache;
 }
+let guideCache = null;
+async function guide() {
+  if (!guideCache) guideCache = await api('GET', '/api/guide');
+  return guideCache;
+}
+const topicFor = recipe => (guideCache || []).find(t => t.recipe === recipe) || null;
 function showAuth() {
   stopTimers(); stack.length = 0; setMain(null);
   if (ver('6.1')) tryTg(() => tg.BackButton.hide());
@@ -384,6 +425,7 @@ async function pollState() {
     if (s.now) skew = s.now - Date.now() / 1000;
     sample(s.system);
     if (!recipesCache) await recipes().catch(() => { recipesCache = null; });
+    if (!guideCache) guide().catch(() => { guideCache = null; });
   } catch (e) {
     failures++;
   }
@@ -549,13 +591,16 @@ function renderHome() {
   const past = s.jobs.filter(j => !ACTIVE.includes(j.state));
   const shownPast = showAllJobs ? past : past.slice(0, 12);
   const ago = lastPoll ? Math.round((Date.now() - lastPoll) / 1000) : null;
-  app.innerHTML = `<h1>Kolejka</h1>
+  app.innerHTML = `<div class="h1row"><h1>Kolejka</h1><button class="btn sm ghost" data-act="guide">📖 Przewodnik</button></div>
     <div class="sub">compute-bot ${esc(s.version)}${ago != null ? ` · odświeżone ${ago < 3 ? 'teraz' : ago + ' s temu'}` : ''}</div>
+    ${s.jobs.length ? '' : `<div class="sec start"><span class="e">🚀</span><h2>Zacznij tutaj</h2>
+      <p>Kolejka jest pusta. Pierwsze kroki zajmą 10 minut: co wysłać botowi, jak ruszyć gotowy przykład i gdzie szukać wyniku.</p>
+      <button class="btn" data-act="topic" data-id="start">🚀 Zacznij tutaj</button></div>`}
     ${healthHtml(s)}
     ${drafts.length ? `<div class="sh">Czeka na start <span>${drafts.length}</span></div><div class="sec">${drafts.map(draftRow).join('')}</div>` : ''}
-    <div class="sh">W toku <span>${active.length || ''}</span></div>
+    ${s.jobs.length ? `<div class="sh">W toku <span>${active.length || ''}</span></div>
     <div class="sec">${active.length ? active.map(jobRow).join('') :
-      '<div class="empty"><span class="e">🌙</span>Nic się nie liczy. Wyślij botowi plik albo <span class="mono">/md 1E0L</span>, a zadanie pojawi się tutaj.</div>'}</div>
+      '<div class="empty"><span class="e">🌙</span>Nic się nie liczy. Wyślij botowi plik albo <span class="mono">/md 1E0L</span>, a zadanie pojawi się tutaj.</div>'}</div>` : ''}
     ${past.length ? `<div class="sh">Historia <span>${past.length}</span></div><div class="sec">${shownPast.map(jobRow).join('')}
       ${past.length > shownPast.length ? `<div class="row tap" data-act="allJobs"><span class="grow link">Pokaż starsze (${past.length - shownPast.length})</span></div>` : ''}</div>` : ''}`;
 }
@@ -571,12 +616,14 @@ async function toggleHold() {
 }
 
 // ---------- ekran 2: Zadanie N ---------------------------------------------------------------------------------
-const J = { id: 0, data: null, sig: '', timer: null, logBytes: 20000, logOpen: false, ext: 1, filter: '', allFiles: false, wrap: true };
+const J = { id: 0, data: null, sig: '', timer: null, logBytes: 20000, logOpen: false, ext: 1, filter: '', allFiles: false, wrap: true, links: {} };
+const READ_RESULT = ['md', 'qsar', 'omics', 'dock', 'charmm'];  // przepisy z rozdziałem „Jak czytać wynik” w przewodniku
 const imgUrls = new Map();
 const IMG = /\.(png|jpe?g|svg|gif|webp)$/i, TEXT = /\.(txt|csv|tsv|log|out|mdp|json|md|dat|xvg|smi|itp|top)$/i;
 function stopJobTimer() { clearTimeout(J.timer); J.timer = null; }
 function screenJob(p) {
-  Object.assign(J, { id: p.id, data: null, sig: '', logBytes: 20000, logOpen: false, filter: '', allFiles: false });
+  Object.assign(J, { id: p.id, data: null, sig: '', logBytes: 20000, logOpen: false, filter: '', allFiles: false,
+    links: p.id === J.id ? J.links : {} });  // link pobrany przed chwilą zostaje po powrocie z przewodnika
   app.innerHTML = `${backLink()}<h1>Zadanie #${p.id}</h1><div class="sec pad"><div class="sk" style="width:60%"></div><div class="sk"></div><div class="sk" style="width:40%"></div></div>
     <div class="sec pad"><div class="sk"></div><div class="sk"></div></div>`;
   loadJob(true);
@@ -657,9 +704,33 @@ function fileListHtml(d) {
         <div class="meta">${size(f.size)}</div></div>
         ${IMG.test(f.path) && !big ? `<button class="btn sm ghost" data-act="img" data-path="${esc(f.path)}" aria-label="podgląd">🖼️</button>` : ''}
         ${TEXT.test(f.path) && f.size < 300e3 ? `<button class="btn sm ghost" data-act="peek" data-path="${esc(f.path)}" aria-label="podgląd">👁</button>` : ''}
-        ${big ? '<span class="badge">za duży (&gt; 50 MB)</span>' : `<button class="btn sm ghost" data-act="send" data-path="${esc(f.path)}">📤 Wyślij na czat</button>`}</div>`;
+        ${big ? `<button class="btn sm ghost" data-act="link" data-path="${esc(f.path)}">⬇️ Pobierz</button>`
+          : `<button class="btn sm ghost" data-act="send" data-path="${esc(f.path)}">📤 Wyślij na czat</button>`}</div>${linkHtml(f.path)}`;
     }).join('') || `<div class="empty">Brak plików${q ? ' pasujących do wyszukiwania' : ''}.</div>`}
     ${list.length > shown.length ? `<div class="row tap" data-act="allFiles"><span class="grow link">Pokaż wszystkie (${list.length})</span></div>` : ''}</div>`;
+}
+/* Plik ponad 50 MB nie przejdzie przez czat: podpisany link /dl/… (links.py), ważny dobę, pobiera przeglądarka. */
+function linkHtml(path) {
+  const url = J.links[path];
+  if (!url) return '';
+  return `<div class="dl"><div class="url">${esc(url)}</div>
+    <div class="btns"><button class="btn sm ghost" data-act="copyLink" data-path="${esc(path)}">📋 Kopiuj link</button>
+      <button class="btn sm ghost" data-act="openLink" data-path="${esc(path)}">↗️ Otwórz</button></div>
+    <div class="hint small">ważny 24 h; działa na urządzeniu z Tailscale albo po <span class="mono">/funnel on</span></div></div>`;
+}
+function openUrl(url) {
+  if (tg && tg.openLink) tryTg(() => tg.openLink(url)); else window.open(url, '_blank', 'noopener');
+}
+async function getLink(btn, path) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = '⏳ Link…';
+  try {
+    const r = await api('POST', `/api/jobs/${J.id}/link`, { path });
+    J.links[path] = location.origin + r.url;
+    haptic('success');
+    const list = $('#fileList'); if (list) list.outerHTML = fileListHtml(J.data);
+    if (tg && tg.openLink) openUrl(J.links[path]);
+  } catch (e) { haptic('error'); toast(e.message, true); btn.disabled = false; btn.textContent = label; }
 }
 function filesHtml(d) {
   const total = d.files.reduce((a, f) => a + f.size, 0);
@@ -673,6 +744,8 @@ function renderJob() {
   J.logOpen = J.logOpen || d.state === 'failed' || d.state === 'running';
   app.innerHTML = `${backLink()}<h1>#${d.id} ${esc(d.name)}</h1><div class="sub">${esc(recipeTitle(d))}</div>
     <div class="sec"><div id="jhead">${jobHeadHtml(d)}</div>${actionsHtml(d)}</div>
+    ${d.state === 'failed' ? '<div class="sec"><div class="row tap" data-act="topic" data-id="problemy"><span class="ico">🧯</span><span class="grow link">Co poszło nie tak?</span><span class="chev">›</span></div></div>' : ''}
+    ${d.state === 'done' && d.kind === 'recipe' && READ_RESULT.includes(d.entry) ? `<div class="sec"><div class="row tap" data-act="topic" data-recipe="${esc(d.entry)}"><span class="ico">📖</span><span class="grow link">Jak czytać wynik?</span><span class="chev">›</span></div></div>` : ''}
     ${d.summary ? `<div class="sh">Podsumowanie <button class="link small" data-act="wrap">${J.wrap ? 'bez zawijania' : 'zawijaj'}</button></div>
       <div class="sec pad"><pre class="block ${J.wrap ? '' : 'nowrap'}" id="summary">${esc(d.summary)}</pre>
       <div class="btns" style="padding:8px 0 0"><button class="btn sm ghost" data-act="copySummary">📋 Kopiuj</button>
@@ -849,7 +922,7 @@ const RELEVANT = {
     test: v => ['ks', 'random'].includes(v.split) || 'tylko przy split=ks albo random' },
   dock: { size: v => !!v.center || 'używany razem z center' },
 };
-const F = { mode: '', recipe: '', R: null, base: {}, vals: {}, defaults: {}, serverError: '', serverParam: '', keep: false };
+const F = { mode: '', recipe: '', R: null, base: {}, vals: {}, defaults: {}, serverError: '', serverParam: '', keep: false, owner: null };
 const num2s = n => String(+n);
 function canon(P, v) {
   if (v == null) return '';
@@ -892,6 +965,8 @@ function check(p, s) {
   }
 }
 async function screenForm(p) {
+  const entry = cur();
+  if (F.owner === entry && F.R) F.keep = true;  // powrót do tego samego formularza (z przewodnika, z podsumowania): edycje zostają
   if (!F.keep) app.innerHTML = `${backLink()}<h1>Parametry</h1><div class="sec pad">${'<div class="sk"></div><div class="sk" style="width:60%"></div>'.repeat(4)}</div>`;
   const my = navId;
   let R;
@@ -900,10 +975,11 @@ async function screenForm(p) {
     if (my === navId) app.innerHTML = `${backLink()}<div class="sec empty"><span class="e">📡</span>${esc(e.message)}</div>`;
     return;
   }
+  if (!guideCache) await guide().catch(() => { guideCache = null; });  // bez przewodnika formularz działa, tylko bez „?”
   if (my !== navId) return;
   const recipe = p.mode === 'draft' ? p.draft.recipe : p.job.entry;
   if (!F.keep) {
-    Object.assign(F, { mode: p.mode, recipe, R: R[recipe], base: {}, vals: {}, defaults: {}, serverError: '', serverParam: '' });
+    Object.assign(F, { mode: p.mode, recipe, R: R[recipe], base: {}, vals: {}, defaults: {}, serverError: '', serverParam: '', owner: entry });
     if (!F.R) { app.innerHTML = `${backLink()}<div class="sec empty">Nieznany przepis „${esc(recipe)}”.</div>`; return; }
     for (const [k, P] of Object.entries(F.R.params)) {
       F.defaults[k] = canon(P, P.default);
@@ -960,7 +1036,8 @@ function renderForm(p) {
   const groups = (GROUPS[F.recipe] || []).map(([t, keys, adv]) => [t, keys.filter(k => all.includes(k) && !used.has(k) && used.add(k)), adv]);
   const rest = all.filter(k => !used.has(k));
   if (rest.length) groups.push(['Inne', rest, false]);
-  app.innerHTML = `${backLink()}<h1>${p.mode === 'draft' ? '▶️ Start' : '🔁 Ponów ze zmianami'}</h1>
+  app.innerHTML = `${backLink()}<div class="h1row"><h1>${p.mode === 'draft' ? '▶️ Start' : '🔁 Ponów ze zmianami'}</h1>
+      ${topicFor(F.recipe) ? `<button class="help" data-act="topic" data-recipe="${esc(F.recipe)}" aria-label="Przewodnik: ${esc(topicFor(F.recipe).title)}">?</button>` : ''}</div>
     <div class="sub">${esc(F.R.title)} · ${esc(name)}</div>
     ${F.serverError ? `<div class="alert"><b>Serwer odrzucił:</b> ${esc(F.serverError)}</div>` : ''}
     <details class="sec"><summary>Co robi ten przepis</summary><div class="pad hint small" style="padding-top:0">${esc(F.R.help)}</div></details>
@@ -1097,10 +1174,87 @@ async function submit(p) {
   }
 }
 
+// ---------- Przewodnik: lista tematów → temat ---------------------------------------------------------------------
+/* Tekst tematu to HTML Telegrama: tylko <b>, <i>, <code>, <pre> i encje &lt; &gt; &amp;. Te cztery znaczniki zostają,
+   wszystko inne (każdy inny znacznik, atrybut, encja) wychodzi jako zwykły tekst. Niedomknięte domyka się samo. */
+const G_TAG = /<\/?(?:b|i|code|pre)>/g;
+function guideHtml(text) {
+  const plain = s => s.replace(/&(?!(?:lt|gt|amp);)/g, '&amp;').replace(/[<>"']/g, c => ({ '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const open = [];
+  let out = '', last = 0, m;
+  text = String(text == null ? '' : text).replace(/\n?(<pre>)\n?/g, '$1').replace(/\n?(<\/pre>)\n?/g, '$1');
+  G_TAG.lastIndex = 0;
+  while ((m = G_TAG.exec(text))) {
+    out += plain(text.slice(last, m.index)); last = G_TAG.lastIndex;
+    const name = m[0].replace(/[</>]/g, '');
+    if (m[0][1] !== '/') { open.push(name); out += m[0]; }
+    else if (open[open.length - 1] === name) { open.pop(); out += m[0]; }
+    else out += plain(m[0]);  // zamknięcie nie do pary: jako tekst
+  }
+  out += plain(text.slice(last));
+  while (open.length) out += `</${open.pop()}>`;
+  return out;
+}
+function guideFail(title, e) {
+  guideCache = null;
+  app.innerHTML = `${backLink()}<h1>${title}</h1><div class="sec empty"><span class="e">📡</span>${esc(e.message)}
+    <div class="btns" style="justify-content:center"><button class="btn" data-act="reshow">Spróbuj ponownie</button></div></div>`;
+}
+const guideSkeleton = title => `${backLink()}<h1>${title}</h1><div class="sec pad">${'<div class="sk"></div><div class="sk" style="width:70%"></div>'.repeat(3)}</div>`;
+async function screenGuide() {
+  if (!guideCache) app.innerHTML = guideSkeleton('📖 Przewodnik');
+  const my = navId;
+  let G;
+  try { G = await guide(); } catch (e) { if (my === navId && e.status !== 401) guideFail('📖 Przewodnik', e); return; }
+  if (my !== navId) return;
+  const lead = t => guideHtml(t.text).replace(/<[^>]+>/g, '').split('\n').filter(Boolean).slice(0, 2).join(' · ');
+  app.innerHTML = `${backLink()}<h1>📖 Przewodnik</h1><div class="sub">Co wysłać, które ustawienia mają znaczenie, jak czytać wynik.</div>
+    <div class="sec">${G.map(t => `<div class="row tap" data-act="topic" data-id="${esc(t.id)}"><div class="grow">
+      <div class="title">${esc(t.title)}</div><div class="meta" style="white-space:nowrap">${lead(t)}</div></div>
+      ${t.example ? '<span class="badge on">▶️ przykład</span>' : ''}<span class="chev">›</span></div>`).join('')}</div>`;
+}
+async function screenTopic(p) {
+  if (!guideCache) app.innerHTML = guideSkeleton('Przewodnik');
+  const my = navId;
+  let G;
+  try { G = await guide(); } catch (e) { if (my === navId && e.status !== 401) guideFail('Przewodnik', e); return; }
+  if (my !== navId) return;
+  const t = G.find(x => p.id ? x.id === p.id : x.recipe === p.recipe) || (p.recipe && G.find(x => x.id === p.recipe));
+  const fromList = stack.length > 1 && stack[stack.length - 2].name === 'guide';
+  const all = fromList ? '' : '<div class="sec"><div class="row tap" data-act="guide"><span class="ico">📖</span><span class="grow link">Wszystkie tematy przewodnika</span><span class="chev">›</span></div></div>';
+  if (!t) { app.innerHTML = `${backLink()}<h1>Przewodnik</h1><div class="sec empty"><span class="e">📖</span>Nie ma takiego tematu.</div>${all}`; return; }
+  app.innerHTML = `${backLink()}<h1>${esc(t.title)}</h1>
+    <div class="sec guide">${guideHtml(t.text)}</div>
+    <div class="hint small" style="margin:-4px 4px 12px">Stuknij komendę albo blok kodu, żeby skopiować.</div>
+    ${t.example ? `<div class="sec pad"><button class="btn" style="width:100%" data-act="example" data-name="${esc(t.example)}">▶️ Wypróbuj na przykładzie</button>
+      <div class="hint small" style="margin-top:8px">Otworzy kartę z gotowymi danymi i ustawieniami – nic nie ruszy, dopóki nie potwierdzisz.</div></div>` : ''}
+    ${all}`;
+}
+async function tryExample(btn, name) {
+  const label = btn.textContent, my = navId;
+  btn.disabled = true; btn.textContent = '⏳ Przygotowuję kartę…';
+  try {
+    const r = await api('POST', `/api/examples/${encodeURIComponent(name)}/draft`, {});
+    lastDrafts = (await api('GET', '/api/drafts')) || {};
+    const d = lastDrafts[r.token];
+    if (!d) throw new ApiError(409, 'Karta przykładu nie pojawiła się na liście – odśwież kolejkę.');
+    haptic('success');
+    if (my === navId) go('form', { mode: 'draft', token: r.token, draft: d });
+  } catch (e) {
+    haptic('error'); toast(e.status === 404 ? 'Nie ma takiego przykładu (starsza wersja bota?).' : e.message, true);
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
 // ---------- zdarzenia ------------------------------------------------------------------------------------------------
-const SCREENS = { home: () => renderHome(), job: screenJob, form: screenForm, confirm: screenConfirm };
+const SCREENS = { home: () => renderHome(), job: screenJob, form: screenForm, confirm: screenConfirm, guide: screenGuide, topic: screenTopic };
 const ACTS = {
   back: () => back(), closeApp: () => tg.close(), retryNet: () => refresh(), reloadJob: () => loadJob(true),
+  guide: () => go('guide'), reshow: () => show(0),
+  topic: el => go('topic', el.dataset.id ? { id: el.dataset.id } : { recipe: el.dataset.recipe }),
+  example: el => tryExample(el, el.dataset.name),
+  link: el => getLink(el, el.dataset.path), openLink: el => openUrl(J.links[el.dataset.path]),
+  copyLink: el => copyTap(J.links[el.dataset.path], $('.url', el.closest('.dl'))),
   hold: () => toggleHold(), allJobs: () => { showAllJobs = true; renderHome(); },
   job: el => go('job', { id: +el.dataset.id }),
   draft: el => { const d = lastDrafts[el.dataset.token]; if (d) go('form', { mode: 'draft', token: el.dataset.token, draft: d }); },
@@ -1109,10 +1263,7 @@ const ACTS = {
   extStep: el => extStep(+el.dataset.d), extend: el => doExtend(el),
   send: el => sendFile(el, el.dataset.path),
   wrap: el => { J.wrap = !J.wrap; $('#summary').classList.toggle('nowrap', !J.wrap); el.textContent = J.wrap ? 'bez zawijania' : 'zawijaj'; },
-  copySummary: () => {
-    const p = navigator.clipboard ? navigator.clipboard.writeText(J.data.summary) : Promise.reject();
-    p.then(() => toast('📋 Skopiowane'), () => toast('Kopiowanie niedostępne – przytrzymaj tekst.', true));
-  },
+  copySummary: () => copyText(J.data.summary).then(ok => ok ? toast('📋 Skopiowane') : toast('Kopiowanie niedostępne – przytrzymaj tekst.', true)),
   gal: el => showImage(J.data.highlights.filter(p => IMG.test(p)), +el.dataset.i),
   img: el => showImage([el.dataset.path], 0),
   galStep: el => showImage(gal.list, (gal.i + +el.dataset.d + gal.list.length) % gal.list.length),
@@ -1132,6 +1283,8 @@ const ACTS = {
   reset: el => { haptic('select'); setVal(el.dataset.p, F.base[el.dataset.p], true); },
 };
 document.addEventListener('click', e => {
+  const code = e.target.closest('.guide pre, .guide code');
+  if (code) return copyTap(code.textContent, code);
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
   if (el.closest('summary')) e.preventDefault();
