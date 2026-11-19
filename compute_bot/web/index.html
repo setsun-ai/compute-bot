@@ -114,6 +114,9 @@ select { background-image: linear-gradient(45deg, transparent 50%, var(--hint) 5
   background-position: calc(100% - 16px) 55%, calc(100% - 11px) 55%; background-size: 5px 5px; background-repeat: no-repeat; padding-right: 28px; }
 input:focus, select:focus { border-color: var(--btn); }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.hours { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
+.hours select { width: auto; flex: 0 0 auto; padding: 6px 26px 6px 9px; }
+.hours .lbl { flex: 0 0 auto; font-size: 13.5px; color: var(--hint); }
 .chip { border: 1px solid var(--sep); border-radius: 16px; padding: 5px 11px; background: var(--sec); font-size: 13.5px; }
 .chip.on { background: var(--btn); color: var(--btn-text); border-color: var(--btn); }
 .seg { display: flex; background: var(--sec); border-radius: 9px; padding: 2px; gap: 2px; }
@@ -430,7 +433,8 @@ async function pollState() {
     failures++;
   }
   if (authLost) return;
-  if (cur().name === 'home') renderHome();
+  // nie przerysowuj pod palcem: wybór godzin nocy zniknąłby w trakcie
+  if (cur().name === 'home' && !(document.activeElement && document.activeElement.closest('.hours'))) renderHome();
   schedule();
 }
 function schedule() {
@@ -607,6 +611,8 @@ function renderHome() {
       ${past.length > shownPast.length ? `<div class="row tap" data-act="allJobs"><span class="grow link">Pokaż starsze (${past.length - shownPast.length})</span></div>` : ''}</div>` : ''}`;
 }
 /* Tryb nocny (/noc): wolniejszy CPU i niższy próg temperatury, żeby wentylator nie budził domowników. */
+const nightPick = {};  // godziny wybrane w panelu, zanim ktoś naciśnie „Ustaw” (przeżywają odświeżenie)
+document.addEventListener('change', e => { if (e.target.closest && e.target.closest('.hours')) nightPick[e.target.id] = +e.target.value; });
 const NIGHT_CMDS = [['teraz', '🌙 Od teraz do rana'], ['22-7', '22–7'], ['23-8', '23–8'], ['0-9', '0–9'], ['off', '☀️ Wyłącz']];
 function nightHtml(s) {
   const n = s.night || {}, r = s.runner || {};
@@ -622,12 +628,18 @@ function nightHtml(s) {
   return `<div class="sec"><div class="row"><span class="ico">${n.on ? '🌙' : '☀️'}</span><div class="grow">
       <div class="title">${esc(head)}</div><div class="meta">${esc(set)}</div>${note ? `<div class="meta">${esc(note)}</div>` : ''}${warn}
       <div class="chips">${NIGHT_CMDS.map(([c, label]) => `<button type="button" class="chip ${c === cur || (c === 'teraz' && n.until > now()) ? 'on' : ''}" data-act="night" data-cmd="${c}">${esc(label)}</button>`).join('')}</div>
+      <div class="hours"><span class="lbl">własne:</span>${hourSelect('nightFrom', nightPick.nightFrom ?? (n.hours ? n.hours[0] : 22))}<span>–</span>${hourSelect('nightTo', nightPick.nightTo ?? (n.hours ? n.hours[1] : 7))}
+        <button type="button" class="btn sm" data-act="nightCustom">Ustaw</button></div>
     </div></div></div>`;
+}
+function hourSelect(id, value) {
+  return `<select id="${id}" aria-label="${id === 'nightFrom' ? 'od godziny' : 'do godziny'}">${Array.from({ length: 24 }, (_, h) =>
+    `<option value="${h}" ${h === value ? 'selected' : ''}>${h}:00</option>`).join('')}</select>`;
 }
 async function setNight(cmd) {
   try {
     const st = await api('POST', '/api/night', { cmd });
-    haptic('success'); lastState = st;
+    haptic('success'); lastState = st; delete nightPick.nightFrom; delete nightPick.nightTo;
     toast(cmd === 'off' ? '☀️ Tryb nocny wyłączony' : cmd === 'teraz' ? '🌙 Cicho od teraz do rana' : `🌙 Noc ${cmd.replace('-', '–')}`);
     renderHome();
   } catch (e) { haptic('error'); toast(e.message, true); }
@@ -1283,7 +1295,10 @@ const ACTS = {
   example: el => tryExample(el, el.dataset.name),
   link: el => getLink(el, el.dataset.path), openLink: el => openUrl(J.links[el.dataset.path]),
   copyLink: el => copyTap(J.links[el.dataset.path], $('.url', el.closest('.dl'))),
-  hold: () => toggleHold(), night: el => setNight(el.dataset.cmd), allJobs: () => { showAllJobs = true; renderHome(); },
+  hold: () => toggleHold(), night: el => setNight(el.dataset.cmd),
+  nightCustom: () => { const a = $('#nightFrom').value, b = $('#nightTo').value;
+    if (a === b) return toast('Początek i koniec nocy muszą się różnić.', true); setNight(`${a}-${b}`); },
+  allJobs: () => { showAllJobs = true; renderHome(); },
   job: el => go('job', { id: +el.dataset.id }),
   draft: el => { const d = lastDrafts[el.dataset.token]; if (d) go('form', { mode: 'draft', token: el.dataset.token, draft: d }); },
   remove: () => removeJob(), cleanup: () => cleanup(), discard: el => discardDraft(el.dataset.token),
