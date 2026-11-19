@@ -164,6 +164,9 @@ md_step md  -f md.mdp  -c npt.gro -t npt.cpt -p topol.top
 
 Skończony etap jest pomijany, przerwany wznawia się z checkpointu.  
 
+**Ile zostało**  
+Bot sam czyta postęp bieżącego przebiegu z jego pliku `.log` (procent i godzina końca), także gdy mdrun pisze do pliku. Postęp całości zna tylko skrypt: niech wypisuje np. `echo "PROGRESS: przebieg 7/30"` – bot i panel pokażą to razem z postępem przebiegu.  
+
 **Zasady**  
 Skrypt może zostać uruchomiony drugi raz (po restarcie laptopa), więc niech nie kasuje wyników. Liczba wątków jest w `$COMPUTE_THREADS`. Plik wejściowy ponad 20 MB: `/url LINK skrypt` albo `curl` w skrypcie.  
 

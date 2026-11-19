@@ -598,12 +598,39 @@ function renderHome() {
       <p>Kolejka jest pusta. Pierwsze kroki zajmą 10 minut: co wysłać botowi, jak ruszyć gotowy przykład i gdzie szukać wyniku.</p>
       <button class="btn" data-act="topic" data-id="start">🚀 Zacznij tutaj</button></div>`}
     ${healthHtml(s)}
+    ${nightHtml(s)}
     ${drafts.length ? `<div class="sh">Czeka na start <span>${drafts.length}</span></div><div class="sec">${drafts.map(draftRow).join('')}</div>` : ''}
     ${s.jobs.length ? `<div class="sh">W toku <span>${active.length || ''}</span></div>
     <div class="sec">${active.length ? active.map(jobRow).join('') :
       '<div class="empty"><span class="e">🌙</span>Nic się nie liczy. Wyślij botowi plik albo <span class="mono">/md 1E0L</span>, a zadanie pojawi się tutaj.</div>'}</div>` : ''}
     ${past.length ? `<div class="sh">Historia <span>${past.length}</span></div><div class="sec">${shownPast.map(jobRow).join('')}
       ${past.length > shownPast.length ? `<div class="row tap" data-act="allJobs"><span class="grow link">Pokaż starsze (${past.length - shownPast.length})</span></div>` : ''}</div>` : ''}`;
+}
+/* Tryb nocny (/noc): wolniejszy CPU i niższy próg temperatury, żeby wentylator nie budził domowników. */
+const NIGHT_CMDS = [['teraz', '🌙 Od teraz do rana'], ['22-7', '22–7'], ['23-8', '23–8'], ['0-9', '0–9'], ['off', '☀️ Wyłącz']];
+function nightHtml(s) {
+  const n = s.night || {}, r = s.runner || {};
+  const hhmm = t => new Date(t * 1000).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+  const parts = [];
+  if (n.hours) parts.push(`${n.hours[0]}:00–${n.hours[1]}:00`);
+  if (n.until > now()) parts.push(`od teraz do ${hhmm(n.until)}`);
+  const set = parts.length ? parts.join(', ') : 'wyłączony – zawsze pełna moc';
+  const head = n.on ? 'Tryb nocny – teraz cicho' : 'Tryb nocny';
+  const note = n.on || parts.length ? 'nocą CPU bez turbo, do 50%; pauza powyżej 70 °C – liczy ok. 2× wolniej' : '';
+  const warn = r.cpu_limit === false && parts.length ? '<div class="meta">⚠️ brak zgody na zwalnianie CPU – działa tylko próg temperatury (polecenie: /noc w bocie)</div>' : '';
+  const cur = n.hours ? `${n.hours[0]}-${n.hours[1]}` : '';
+  return `<div class="sec"><div class="row"><span class="ico">${n.on ? '🌙' : '☀️'}</span><div class="grow">
+      <div class="title">${esc(head)}</div><div class="meta">${esc(set)}</div>${note ? `<div class="meta">${esc(note)}</div>` : ''}${warn}
+      <div class="chips">${NIGHT_CMDS.map(([c, label]) => `<button type="button" class="chip ${c === cur || (c === 'teraz' && n.until > now()) ? 'on' : ''}" data-act="night" data-cmd="${c}">${esc(label)}</button>`).join('')}</div>
+    </div></div></div>`;
+}
+async function setNight(cmd) {
+  try {
+    const st = await api('POST', '/api/night', { cmd });
+    haptic('success'); lastState = st;
+    toast(cmd === 'off' ? '☀️ Tryb nocny wyłączony' : cmd === 'teraz' ? '🌙 Cicho od teraz do rana' : `🌙 Noc ${cmd.replace('-', '–')}`);
+    renderHome();
+  } catch (e) { haptic('error'); toast(e.message, true); }
 }
 async function toggleHold() {
   const on = !lastState.hold;
@@ -1256,7 +1283,7 @@ const ACTS = {
   example: el => tryExample(el, el.dataset.name),
   link: el => getLink(el, el.dataset.path), openLink: el => openUrl(J.links[el.dataset.path]),
   copyLink: el => copyTap(J.links[el.dataset.path], $('.url', el.closest('.dl'))),
-  hold: () => toggleHold(), allJobs: () => { showAllJobs = true; renderHome(); },
+  hold: () => toggleHold(), night: el => setNight(el.dataset.cmd), allJobs: () => { showAllJobs = true; renderHome(); },
   job: el => go('job', { id: +el.dataset.id }),
   draft: el => { const d = lastDrafts[el.dataset.token]; if (d) go('form', { mode: 'draft', token: el.dataset.token, draft: d }); },
   remove: () => removeJob(), cleanup: () => cleanup(), discard: el => discardDraft(el.dataset.token),

@@ -24,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import VERSION, actions, examples, guide, jobs, links
+from . import VERSION, actions, examples, guide, jobs, links, updater
 from .recipes import RECIPES, ParamError, quick_values
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
@@ -105,8 +105,15 @@ class App:
         statuses = self.store.statuses()
         return {"version": VERSION, "now": self.clock(), "hold": self.store.hold, "system": self.system_info(),
                 "max_attempts": jobs.MAX_ATTEMPTS, "queue": jobs.queue_order(statuses, self.store.priorities()),
-                "runner": {"alive": alive, **{k: beat.get(k) for k in ("time", "job", "blocked", "free", "threads")}},
+                "runner": {"alive": alive, **{k: beat.get(k) for k in ("time", "job", "blocked", "free", "threads",
+                                                                       "night", "cpu_limit")}},
+                "night": self.night(),
                 "jobs": [job_json(self.store, spec) for spec in reversed(self.store.specs()[-50:])]}
+
+    def night(self):
+        night = self.store.night()
+        now = self.clock()
+        return {**night, "on": jobs.night_now(night, now, time.localtime(now).tm_hour)}
 
     def job(self, job):
         spec = self.store.spec(job)
@@ -176,6 +183,9 @@ class App:
 
     def post(self, path, body):
         parts = path.strip("/").split("/")[1:]
+        if parts == ["night"]:
+            self.store.set_night(jobs.night_change(self.store.night(), str(body.get("cmd", "")), self.clock()))
+            return self.state()
         if parts == ["hold"]:
             self.store.set_hold(bool(body.get("on")))
             return {"hold": self.store.hold}
@@ -372,7 +382,26 @@ def main():
     port = int(os.environ.get("WEB_PORT", "8787"))
     app = App(jobs.Store(home), token, int(owner), lambda: system_json(home))
     print(f"compute-web {VERSION} on 127.0.0.1:{port}", flush=True)
-    make_server(app, "127.0.0.1", port).serve_forever()
+    serve(make_server(app, "127.0.0.1", port), lambda: updater.restart_wanted(home))
+    print("newer version installed, restarting", flush=True)
+    return 0
+
+
+def serve(httpd, restart_wanted, every=60):
+    """Serve until a newer version is installed (/update); systemd then starts the panel on the new code."""
+    stop = threading.Event()
+
+    def watch():
+        while not stop.wait(every):
+            if restart_wanted():
+                httpd.shutdown()
+                return
+
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        httpd.serve_forever()
+    finally:
+        stop.set()
 
 
 if __name__ == "__main__":

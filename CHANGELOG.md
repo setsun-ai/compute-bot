@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.3 (2026-11)
+
+- **Panel po `/update` przechodzi na nową wersję.** Wcześniej `/update` restartował bota i runnera, a panel dalej
+  działał na starym kodzie (pokazywał starą wersję). Teraz panel sam się restartuje, gdy zainstalowana jest nowsza
+  wersja. Jednorazowo, przy przejściu na 0.2.3, trzeba go zrestartować ręcznie: `sudo systemctl restart compute-web`.
+- **Tryb nocny w panelu:** karta „Tryb nocny” z przyciskami (od teraz do rana, 22–7, 23–8, 0–9, wyłącz).
+- **Postęp skryptów z GROMACS-em:** gdy `run.sh` kieruje wyjście `mdrun` do pliku, bot czyta postęp z bieżącego
+  pliku `.log` GROMACS-a (procent, ile zostało do końca przebiegu, godzina) i łączy go z ostatnią linią
+  `PROGRESS:` skryptu.
+
 ## 0.2.2 (2026-11)
 
 - **Tryb nocny** `/noc 22-7`, `/noc teraz`, `/noc off` (z przyciskami): nocą zadanie liczy na wolniejszym CPU

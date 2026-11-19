@@ -280,6 +280,77 @@ def next_hour(now, hour):
     return moment
 
 
+def night_change(night, command, now):
+    """The night after the owner's command (bot and panel): "22-7", "teraz" (until the morning hour), "off"."""
+    if command == "off":
+        return dict(NO_NIGHT)
+    if command == "teraz":
+        end = night["hours"][1] if night.get("hours") else 7
+        return {**night, "until": next_hour(now, end)}
+    try:
+        start, end = (int(x) % 24 for x in command.split("-"))
+    except ValueError:
+        raise ParamError("Godziny nocy tak: 22-7 (od 22 do 7). Albo: teraz, off.") from None
+    return {**night, "hours": [start, end]}
+
+
+GMX_LOG_STEP = re.compile(r"^\s+Step\s+Time\s*\n\s+(\d+)", re.M)
+GMX_DYNAMICS = ("md", "md-vv", "md-vv-avek", "sd", "bd")
+
+
+def mdrun_progress(text, mtime):
+    """A running GROMACS dynamics from its .log: {"step", "nsteps", "end"} (end: epoch, from the speed since the
+    last start, so a resumed run counts from its restart), or None for a finished run, a minimisation, not a log."""
+    integrator = re.search(r"^\s+integrator\s+=\s+(\S+)", text, re.M)
+    nsteps = re.search(r"^\s+nsteps\s+=\s+(\d+)", text, re.M)
+    begin = text.rfind("Started mdrun")
+    if not integrator or integrator[1] not in GMX_DYNAMICS or not nsteps or begin < 0:
+        return None
+    if "Finished mdrun" in text[begin:]:
+        return None
+    try:
+        stamp = text[begin:].split("\n", 1)[0].split(" rank 0 ", 1)[1].strip()
+        started = time.mktime(time.strptime(stamp, "%a %b %d %H:%M:%S %Y"))
+    except (IndexError, ValueError):
+        return None
+    steps = [int(x) for x in GMX_LOG_STEP.findall(text[begin:])]
+    if len(steps) < 2 or mtime <= started or steps[-1] <= steps[0]:
+        return None
+    rate = (steps[-1] - steps[0]) / (mtime - started)
+    total = int(nsteps[1])
+    return {"step": steps[-1], "nsteps": total, "end": mtime + max(0, total - steps[-1]) / rate}
+
+
+def left_text(seconds):
+    minutes = round(max(0, seconds) / 60)
+    if minutes < 1:
+        return "<1 min"
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60} min"
+
+
+def live_mdrun(work, now, fresh=180):
+    """Progress of the GROMACS run a job is in now (its newest .log written in the last minutes), as one line."""
+    try:
+        logs = [(p.stat().st_mtime, p) for p in Path(work).rglob("*.log")]
+    except OSError:
+        return ""
+    logs = sorted((m, p) for m, p in logs if now - m < fresh and p.stat().st_size < 16 * 1024 ** 2)
+    for mtime, path in reversed(logs):
+        found = mdrun_progress(path.read_text(errors="replace"), mtime)
+        if found:
+            label = str(path.relative_to(work).with_suffix(""))
+            pct = 100 * found["step"] / max(1, found["nsteps"])
+            at = time.strftime("%d.%m %H:%M", time.localtime(found["end"]))
+            return (f"{label}: {pct:.0f}% (krok {found['step']}/{found['nsteps']}), "
+                    f"etap jeszcze ~{left_text(found['end'] - now)} (ok. {at})")
+    return ""
+
+
+def last_progress_line(text):
+    lines = [line for line in re.split(r"[\r\n]+", text) if line.startswith("PROGRESS:")]
+    return lines[-1][len("PROGRESS:"):].strip() if lines else ""
+
+
 GMX_ETA = re.compile(r"step (\d+), will finish (.+?)\s*$")
 
 

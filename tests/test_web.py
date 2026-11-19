@@ -260,3 +260,28 @@ def test_tapping_an_example_twice_gives_the_same_card(server):
     assert len(call(base, "/api/drafts")[1]) == 1
     call(base, f"/api/drafts/{first}/discard", {})
     assert call(base, "/api/examples/qsar/draft", {})[1]["token"] != first
+
+
+def test_night_from_the_panel(server):
+    store, base, _ = server
+    code, state = call(base, "/api/night", {"cmd": "22-7"})
+    assert code == 200 and store.night()["hours"] == [22, 7] and state["night"]["hours"] == [22, 7]
+    assert "on" in state["night"]
+    assert call(base, "/api/night", {"cmd": "jutro"})[0] == 400
+    store.set_runner_state({"time": 1, "night": True, "cpu_limit": True})
+    assert call(base, "/api/state")[1]["night"]["hours"] == [22, 7]
+    assert call(base, "/api/state")[1]["runner"]["cpu_limit"] is True
+
+
+def test_the_server_stops_for_a_newer_version_so_systemd_starts_the_new_one(tmp_path):
+    app = web.App(jobs.Store(tmp_path), TOKEN, OWNER, system_info=lambda: {})
+    httpd = web.make_server(app, "127.0.0.1", 0)
+    asked = []
+    done = threading.Event()
+
+    def run():
+        web.serve(httpd, lambda: asked.append(1) or len(asked) > 1, every=0.05)
+        done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    assert done.wait(5) and len(asked) == 2

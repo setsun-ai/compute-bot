@@ -287,3 +287,19 @@ def test_a_runner_restart_without_a_reboot_is_not_a_reboot(tmp_path):
     runner.recover()
     runner.heartbeat(force=True)
     assert store.runner_state()["restart"] is None
+
+
+def test_a_script_that_hides_mdrun_still_shows_how_far_the_run_is(tmp_path):
+    store, runner = make(tmp_path)
+    start = time.strftime("%a %b %d %H:%M:%S %Y", time.localtime(time.time() - 100))
+    log = ("   integrator                     = md\n   nsteps                         = 25000\n"
+           f"Started mdrun on rank 0 {start}\n\n           Step           Time\n              0        0.00000\n\n"
+           "           Step           Time\n           5000       10.00000\n")
+    job = script(store, f"mkdir -p sys/a; echo PROGRESS: przebieg 2/30; cat > sys/a/nvt.log << 'X'\n{log}X\nsleep 1")
+    run_until(runner, store, job, {"running"})
+    time.sleep(0.3)
+    runner.last_progress = 0
+    runner.tick()
+    progress = store.status(job).progress
+    assert progress.startswith("przebieg 2/30 · ")
+    assert "sys/a/nvt" in progress and "20%" in progress and "etap jeszcze ~" in progress

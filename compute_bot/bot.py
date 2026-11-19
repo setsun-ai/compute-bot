@@ -444,19 +444,9 @@ class Bot:
     def night_command(self, rest):
         """Hours when someone sleeps next to the laptop: the runner slows the CPU so the fans stay quiet."""
         night = self.store.night()
-        if rest == "off":
-            night = dict(jobs.NO_NIGHT)
-        elif rest == "teraz":
-            end = night["hours"][1] if night["hours"] else 7
-            night["until"] = jobs.next_hour(self.clock(), end)
-        elif rest:
-            try:
-                start, end = (int(x) % 24 for x in rest.split("-"))
-            except ValueError:
-                raise ParamError("Godziny nocy tak: /noc 22-7 (od 22 do 7). Albo /noc teraz, /noc off.") from None
-            night["hours"] = [start, end]
-        else:
+        if not rest:
             return self.say(self.night_text(night), self.night_buttons())
+        night = jobs.night_change(night, rest, self.clock())
         self.store.set_night(night)
         self.say(self.night_text(night))
 

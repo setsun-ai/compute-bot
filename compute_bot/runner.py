@@ -255,9 +255,20 @@ class Runner:
                 self.store.set_status(job, status)
         if now - self.last_progress >= PROGRESS_EVERY:
             self.last_progress = now
-            progress = jobs.progress_from_log(self.store.log_tail(job, 20000))
+            progress = self.progress(job, now)
             if progress and progress != status.progress:
                 self.store.set_status(job, status._replace(progress=progress))
+
+    def progress(self, job, now):
+        """What the job says (PROGRESS: lines, mdrun's ETA); for scripts also how far the GROMACS run it is in now
+        is, read from that run's .log, because scripts often send mdrun's own output to a file."""
+        tail = self.store.log_tail(job, 20000)
+        if self.store.spec(job).kind in ("script", "python", "notebook"):
+            live = jobs.live_mdrun(self.store.work(job), now)
+            if live:
+                said = jobs.last_progress_line(tail)
+                return f"{said} · {live}" if said else live
+        return jobs.progress_from_log(tail)
 
     def finish(self, code):
         job, status = self.job, self.store.status(self.job)

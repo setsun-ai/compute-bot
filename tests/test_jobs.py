@@ -288,3 +288,61 @@ def test_the_night_setting_is_kept_on_disk(tmp_path):
     assert store.night() == jobs.NO_NIGHT
     store.set_night({"hours": [23, 6], "until": 0})
     assert jobs.Store(tmp_path).night() == {"hours": [23, 6], "until": 0}
+
+
+def test_night_changes_from_a_command():
+    now = time.mktime((2026, 11, 19, 21, 0, 0, 0, 0, -1))
+    night = jobs.night_change(jobs.NO_NIGHT, "22-7", now)
+    assert night == {"hours": [22, 7], "until": 0}
+    night = jobs.night_change(night, "teraz", now)
+    assert night["hours"] == [22, 7] and time.localtime(night["until"])[:5] == (2026, 11, 20, 7, 0)
+    assert jobs.night_change(night, "off", now) == jobs.NO_NIGHT
+    with pytest.raises(ParamError):
+        jobs.night_change(night, "late", now)
+
+
+# --- how far a GROMACS run is, read from its .log (scripts that hide mdrun's output) ------------------------
+
+GMX_LOG = """                      :-) GROMACS - gmx mdrun, 2026.3-conda_forge (-:
+Input Parameters:
+   integrator                     = md
+   tinit                          = 0
+   dt                             = 0.002
+   nsteps                         = 25000
+   init-step                      = 0
+Started mdrun on rank 0 Thu Nov 19 10:27:18 2026
+
+           Step           Time
+              0        0.00000
+
+   Energies (kJ/mol)
+           Step           Time
+           5000       10.00000
+
+   Energies (kJ/mol)
+"""
+
+
+def started(text):
+    return time.mktime(time.strptime("Thu Nov 19 10:27:18 2026", "%a %b %d %H:%M:%S %Y"))
+
+
+def test_mdrun_progress_from_its_log():
+    start = started(GMX_LOG)
+    p = jobs.mdrun_progress(GMX_LOG, mtime=start + 100)
+    assert (p["step"], p["nsteps"]) == (5000, 25000)
+    assert p["end"] == pytest.approx(start + 100 + 20000 / 50)  # 5000 steps in 100 s
+
+
+def test_mdrun_progress_after_a_resume_counts_from_the_restart():
+    start = started(GMX_LOG)
+    resumed = (GMX_LOG + "Started mdrun on rank 0 Thu Nov 19 11:27:18 2026\n\n           Step           Time\n"
+               "           5000       10.00000\n\n           Step           Time\n          10000       20.00000\n")
+    p = jobs.mdrun_progress(resumed, mtime=start + 3600 + 50)
+    assert p["step"] == 10000 and p["end"] == pytest.approx(start + 3650 + 15000 / 100)
+
+
+def test_no_progress_for_a_finished_run_or_a_minimisation():
+    assert jobs.mdrun_progress(GMX_LOG + "\nFinished mdrun on rank 0 Thu Nov 19 10:40:00 2026\n", 0) is None
+    assert jobs.mdrun_progress(GMX_LOG.replace("= md\n", "= steep\n"), 0) is None
+    assert jobs.mdrun_progress("not a log", 0) is None
