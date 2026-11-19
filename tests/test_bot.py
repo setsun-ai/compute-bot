@@ -620,3 +620,70 @@ def test_md_results_offer_the_script_button(env):
     data = [b.get("callback_data") for c in api.sent("sendMessage") if c[1].get("reply_markup")
             for row in json.loads(c[1]["reply_markup"])["inline_keyboard"] for b in row]
     assert "j:1:skrypt" in data
+
+
+# --- quiet nights for whoever sleeps next to the laptop ----------------------------------------------------
+
+def test_night_hours_are_set_for_the_runner_and_switched_off(env):
+    bot, api, store, clock = env
+    bot.handle_update(message("/noc 22-7"))
+    assert store.night()["hours"] == [22, 7]
+    assert "22:00–7:00" in api.last_text()
+    bot.handle_update(message("/noc off"))
+    assert store.night() == jobs.NO_NIGHT
+    assert "wyłączon" in api.last_text()
+
+
+def test_night_from_now_lasts_until_the_morning_hour(env):
+    bot, api, store, clock = env
+    bot.handle_update(message("/noc 23-8"))
+    bot.handle_update(message("/noc teraz"))
+    night = store.night()
+    assert night["hours"] == [23, 8]  # the usual hours stay
+    until = jobs.next_hour(clock.now, 8)
+    assert night["until"] == until
+    assert jobs.night_now(night, clock.now, hour=15) and not jobs.night_now(night, until, hour=8)
+
+
+def test_night_alone_shows_the_setting_with_quick_buttons(env):
+    bot, api, store, clock = env
+    bot.handle_update(message("/noc"))
+    assert "wyłączon" in api.last_text()
+    taps = [b["callback_data"] for b in last_buttons(api)]
+    assert "n:teraz" in taps and "n:off" in taps
+    tap(bot, "n:22-7")
+    assert store.night()["hours"] == [22, 7]
+
+
+def test_night_tells_how_to_let_the_runner_slow_the_cpu_when_it_cannot(env):
+    bot, api, store, clock = env
+    store.set_runner_state({"time": clock.now, "cpu_limit": False})
+    bot.handle_update(message("/noc 22-7"))
+    assert "sudo" in api.last_text() and "compute-bot-cpu.conf" in api.last_text()
+
+
+def test_a_night_pause_is_not_announced_nor_its_end(env):
+    bot, api, store, clock = env
+    job = store.create("script", "run.sh", "x.zip", {}, {"run.sh": b"true"}).id
+    store.set_status(job, jobs.Status("running", attempt=1, started=clock.now))
+    bot.tick()
+    sent = len(api.calls)
+    store.set_status(job, jobs.Status("paused", attempt=1, started=clock.now, pause="night"))
+    bot.tick()
+    store.set_status(job, jobs.Status("running", attempt=1, started=clock.now))
+    bot.tick()
+    assert len(api.calls) == sent
+
+
+# --- the laptop rebooted on its own ----------------------------------------------------------------------------
+
+def test_a_reboot_is_reported_once_with_the_gap_and_the_jobs_put_back(env):
+    bot, api, store, clock = env
+    store.set_runner_state({"time": clock.now, "boot": "b2",
+                            "restart": {"after": clock.now - 7 * 3600, "at": clock.now, "jobs": [4]}})
+    bot.tick()
+    text = api.last_text()
+    assert "uruchomił się od nowa" in text and "7 h" in text and "#4" in text
+    sent = len(api.calls)
+    bot.tick()
+    assert len(api.calls) == sent

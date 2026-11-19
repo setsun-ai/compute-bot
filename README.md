@@ -24,7 +24,7 @@ przez Tailscale (telefon w tej samej sieci Tailscale); `/funnel on` udostępnia 
 podpisany Telegram właściciela.
 
 Komendy: `/jobs`, `/job N`, `/log N`, `/get N [plik]`, `/cancel N`, `/retry N [klucz=wartość]`, `/top N`,
-`/usun N`, `/usun stare`, `/pauza`, `/wznow`, `/co 3` (raport postępu co 3 h), `/cisza 23-7`, `/system`, `/env`,
+`/usun N`, `/usun stare`, `/pauza`, `/wznow`, `/co 3` (raport postępu co 3 h), `/cisza 23-7`, `/noc 22-7` (nocą wolniej i ciszej), `/system`, `/env`,
 `/update`, `/rollback`, `/help [przepis]`. Bot ostrzega, gdy runner przestaje odpowiadać albo kończy się dysk.
 
 **Nie wiesz, od czego zacząć?** [docs/przewodnik.md](docs/przewodnik.md) (w bocie: `/guide`, w panelu: 📖) –

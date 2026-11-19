@@ -96,6 +96,8 @@ fi
 
 install -m 755 "$OPT/app/deploy/compute" /usr/local/bin/compute
 install -m 644 "$OPT/app/deploy/profile.sh" /etc/profile.d/compute-bot.sh
+install -m 644 "$OPT/app/deploy/compute-bot-cpu.conf" /etc/tmpfiles.d/compute-bot-cpu.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/compute-bot-cpu.conf || true  # quiet nights: /noc
 install -m 644 "$OPT/app/deploy/compute-bot.service" "$OPT/app/deploy/compute-runner.service" \
   "$OPT/app/deploy/compute-web.service" /etc/systemd/system/
 systemctl daemon-reload

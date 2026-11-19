@@ -227,6 +227,12 @@ Bot pokazuje koniec logu; ostatnia linia `ERROR:` mówi po polsku, co poprawić 
 **🌡️ „Za gorąco, wstrzymuję”**  
 Normalne zabezpieczenie: powyżej 92 °C zadanie czeka, aż procesor ostygnie do 75 °C, i rusza samo. Jeśli dzieje się ciągle – laptop stoi na czymś miękkim albo ma zakurzony wentylator.  
 
+**🌙 Ktoś śpi obok laptopa**  
+`/noc 22-7` ustawia godziny nocy, `/noc teraz` włącza ją od razu do rana, `/noc off` wyłącza. Nocą zadanie liczy na wolniejszym CPU (bez turbo, do połowy taktowania), a powyżej 70 °C czeka, aż laptop ostygnie – wentylator zostaje cichy, liczenie trwa mniej więcej dwa razy dłużej. `/system` pokazuje temperaturę i obroty wentylatora. To co innego niż `/cisza`, która tylko wycisza wiadomości.  
+
+**🔌 „Laptop uruchomił się od nowa”**  
+Laptop czasem sam się resetuje (zwykle nocą). Bot pisze, kiedy był ostatni znak życia i ile trwała przerwa – może to być minuta albo kilka godzin, gdy ktoś musi go włączyć ręcznie. Przerwane zadanie wraca do kolejki: dynamika liczy dalej od checkpointu, własny `run.sh` zaczyna od nowa, chyba że sam pomija gotowe etapy (`/guide skrypty`).  
+
 **🔁 „Wznowione po przerwie”**  
 Laptop się zrestartował albo zaktualizował. Dynamika traci najwyżej kilka minut. Po trzech takich przerwach zadanie kończy się błędem, żeby nie kręcić się w kółko.  
 

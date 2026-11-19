@@ -1,5 +1,16 @@
 # Changelog
 
+## Niewydane
+
+- **Tryb nocny** `/noc 22-7`, `/noc teraz`, `/noc off` (z przyciskami): nocą zadanie liczy na wolniejszym CPU
+  (bez turbo, do 50% taktowania) i czeka powyżej 70 °C, żeby wentylator nie hałasował, gdy ktoś śpi. Ograniczenie
+  CPU wymaga jednorazowo reguły `deploy/compute-bot-cpu.conf` w `/etc/tmpfiles.d/` (instalator ją kładzie; bot
+  podaje polecenie, gdy jej brakuje). Pauzy nocne nie wysyłają wiadomości.
+- **Restart laptopa:** bot pisze raz po każdym samoczynnym restarcie: kiedy był ostatni znak życia, ile trwała
+  przerwa i które zadania wróciły do kolejki (wykrywane po `boot_id`).
+- Pliki stanu zapisywane z `fsync` przed podmianą, więc nagły reset nie zostawia pustego `status.json`.
+- `/system` pokazuje obroty wentylatora i to, czy trwa noc.
+
 ## 0.2.1 (2026-11)
 
 - **Nietypowe ustawienia MD:** `T_eq=` (temperatura równowagowania), `mdp=` dla każdego etapu z przedrostkiem

@@ -458,9 +458,10 @@ const ST = { queued: ['⏳', 'W kolejce'], running: ['⚙️', 'Liczy się'], pa
 const ACTIVE = ['queued', 'running', 'paused'];
 const maxAttempts = () => (lastState && lastState.max_attempts) || 3;
 const queuePos = id => lastState && lastState.queue ? lastState.queue.indexOf(id) + 1 : 0;  // 1 = następne do startu
-const stIcon = j => j.state === 'paused' ? (j.pause === 'heat' ? '🌡️' : '⏸️') : (ST[j.state] || ['❔'])[0];
+const PAUSE = { heat: ['🌡️', 'Wstrzymane – procesor za gorący'], night: ['🌙', 'Noc – czeka, aż laptop ostygnie'] };
+const stIcon = j => j.state === 'paused' ? (PAUSE[j.pause] || ['⏸️'])[0] : (ST[j.state] || ['❔'])[0];
 function stLabel(j) {
-  if (j.state === 'paused') return j.pause === 'heat' ? 'Wstrzymane – procesor za gorący' : 'Wstrzymane – pauza kolejki';
+  if (j.state === 'paused') return (PAUSE[j.pause] || [0, 'Wstrzymane – pauza kolejki'])[1];
   if (j.state === 'failed' && j.exit_code != null) return `Błąd (kod ${j.exit_code})`;
   return (ST[j.state] || ['', j.state])[1];
 }
@@ -658,7 +659,7 @@ function jobHeadHtml(d) {
   }
   return `<div class="row"><span class="ico">${stIcon(d)}</span><div class="grow"><div class="title">${esc(stLabel(d))}</div>
       ${d.progress ? `<div class="meta" style="white-space:normal">${esc(e ? e.head : d.progress)}</div>` : ''}${e ? etaHtml(e) : ''}
-      ${d.state === 'paused' && d.pause === 'heat' ? '<div class="eta">Wznowi się samo, gdy procesor ostygnie poniżej 75 °C.</div>' : ''}</div></div>
+      ${d.state === 'paused' && d.pause === 'heat' ? '<div class="eta">Wznowi się samo, gdy procesor ostygnie poniżej 75 °C.</div>' : ''}${d.state === 'paused' && d.pause === 'night' ? '<div class="eta">Tryb nocny (/noc): rusza samo poniżej 60 °C.</div>' : ''}</div></div>
     <div class="kv">${rows.map(([k, v]) => `<span>${k}</span><span>${esc(v)}</span>`).join('')}</div>`;
 }
 function renderJobHead() { const h = $('#jhead'); if (h && J.data) h.innerHTML = jobHeadHtml(J.data); }

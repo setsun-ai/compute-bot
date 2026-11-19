@@ -1,5 +1,6 @@
 """The job model as the bot and the runner use it: files on disk, states, what to run."""
 import io
+import time
 import zipfile
 
 import pytest
@@ -251,3 +252,39 @@ def test_a_continuation_shares_the_parents_files_without_copying(tmp_path):
     assert linked.stat().st_ino == (store.work(parent) / "gromacs/md.xtc").stat().st_ino
     assert jobs.json.loads((store.work(child) / "params.json").read_text())["extend_ns"] == 5.0
     assert store.spec(child).name.startswith("1E0L")
+
+
+# --- quiet nights: hours the owner set, or "from now until morning" ---------------------------------
+
+def test_night_hours_wrap_past_midnight():
+    night = {"hours": [22, 7], "until": 0}
+    assert jobs.night_now(night, now=0, hour=23) and jobs.night_now(night, now=0, hour=3)
+    assert not jobs.night_now(night, now=0, hour=7) and not jobs.night_now(night, now=0, hour=15)
+
+
+def test_night_hours_within_one_day():
+    night = {"hours": [1, 9], "until": 0}
+    assert jobs.night_now(night, now=0, hour=1) and not jobs.night_now(night, now=0, hour=0)
+
+
+def test_night_now_lasts_until_the_set_time_whatever_the_hours():
+    night = {"hours": None, "until": 500.0}
+    assert jobs.night_now(night, now=499.0, hour=14)
+    assert not jobs.night_now(night, now=500.0, hour=14)
+
+
+def test_no_night_set_means_never():
+    assert not jobs.night_now(jobs.NO_NIGHT, now=0, hour=2)
+
+
+def test_next_hour_is_the_next_time_the_clock_shows_it():
+    now = time.mktime((2026, 11, 19, 23, 30, 0, 0, 0, -1))
+    assert time.localtime(jobs.next_hour(now, 7))[:5] == (2026, 11, 20, 7, 0)
+    assert time.localtime(jobs.next_hour(now - 20 * 3600, 7))[:5] == (2026, 11, 19, 7, 0)
+
+
+def test_the_night_setting_is_kept_on_disk(tmp_path):
+    store = jobs.Store(tmp_path)
+    assert store.night() == jobs.NO_NIGHT
+    store.set_night({"hours": [23, 6], "until": 0})
+    assert jobs.Store(tmp_path).night() == {"hours": [23, 6], "until": 0}

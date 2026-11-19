@@ -26,6 +26,8 @@ PROGRESS_EVERY = 20  # seconds between progress updates in status.json
 KILL_GRACE = 10  # seconds between SIGTERM and SIGKILL on cancel
 MIN_FREE = 2 * 1024 ** 3  # a new job starts only with this much free disk
 HEARTBEAT_EVERY = 30  # seconds between writes of runner.json
+PSTATE = Path("/sys/devices/system/cpu/intel_pstate")  # made writable for the group by deploy/compute-bot-cpu.conf
+NIGHT_PERF = 50  # % of the top clock at night, turbo off: about a third of the heat, so the fans stay slow
 
 
 def read_cpu_temp():
@@ -49,14 +51,63 @@ def read_cpu_temp():
     return max(temps) if temps else None
 
 
+def read_fans():
+    """Fan speeds in rpm (dell_smm and the like); empty where the machine doesn't show them."""
+    speeds = []
+    for path in sorted(glob.glob("/sys/class/hwmon/hwmon*/fan*_input")):
+        try:
+            speeds.append(int(Path(path).read_text()))
+        except (OSError, ValueError):
+            pass
+    return speeds
+
+
+def read_boot_id():
+    """Changes with every boot of the machine: tells a reboot (a crash, too) from a restart of the service."""
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except OSError:
+        return None
+
+
+class CpuLimit:
+    """A slower, cooler CPU at night through intel_pstate; does nothing where the files can't be written."""
+
+    def __init__(self, folder=PSTATE):
+        self.folder = Path(folder)
+        self.limited = None  # unknown at start: the first set() writes, so a limit left by a crash goes away
+
+    @property
+    def usable(self):
+        return all(os.access(self.folder / name, os.W_OK) for name in ("no_turbo", "max_perf_pct"))
+
+    def set(self, limited):
+        if limited == self.limited or not self.usable:
+            return
+        values = {"no_turbo": 1, "max_perf_pct": NIGHT_PERF} if limited else {"no_turbo": 0, "max_perf_pct": 100}
+        try:
+            for name, value in values.items():
+                (self.folder / name).write_text(f"{value}\n")
+        except OSError as e:
+            return log(f"cpu limit: {e}")
+        self.limited = limited
+        log(f"cpu limit {'on' if limited else 'off'}")
+
+
 def log(message):
     print(message, flush=True)
 
 
 class Runner:
-    def __init__(self, store, python, threads, read_temp=read_cpu_temp, clock=time.time):
+    def __init__(self, store, python, threads, read_temp=read_cpu_temp, clock=time.time, cpu=None,
+                 boot_id=read_boot_id):
         self.store, self.python, self.threads = store, python, threads
         self.read_temp, self.clock = read_temp, clock
+        self.cpu = cpu or CpuLimit()
+        self.boot = boot_id()
+        self.previous = store.runner_state()  # the last heartbeat before this start
+        self.restart = None  # {"after": last heartbeat, "at": now, "jobs": [put back]} when the machine rebooted
+        self.night = False
         self.job = self.proc = self.log_file = None
         self.kill_at = None
         self.last_progress = self.last_beat = 0.0
@@ -66,25 +117,37 @@ class Runner:
     # --- lifecycle -------------------------------------------------------------------------------
 
     def recover(self):
+        put_back = []
         for job, status in self.store.statuses().items():
             again = jobs.recover(status)
             if again != status:
                 log(f"job {job}: {status.state} at start → {again.state}")
                 self.store.set_status(job, again)
+                put_back.append(job)
+        old_boot = self.previous.get("boot")
+        if old_boot and self.boot and old_boot != self.boot:
+            self.restart = {"after": self.previous.get("time", 0), "at": self.clock(), "jobs": put_back}
+            log(f"the machine rebooted; last heartbeat before: {self.restart['after']}")
 
     def tick(self):
+        now = self.clock()
+        night = jobs.night_now(self.store.night(), now, time.localtime(now).tm_hour)
+        changed, self.night = night != self.night, night
         if self.proc is None:
             self.start_next()
         else:
             self.watch()
-        self.heartbeat()
+        self.cpu.set(self.night and self.proc is not None)
+        self.heartbeat(force=changed)
 
     def heartbeat(self, force=False):
         now = self.clock()
         if force or now - self.last_beat >= HEARTBEAT_EVERY:
             self.last_beat = now
             self.store.set_runner_state({"time": now, "job": self.job, "blocked": self.blocked,
-                                         "free": self.free_space(), "threads": self.threads})
+                                         "free": self.free_space(), "threads": self.threads, "boot": self.boot,
+                                         "restart": self.restart, "night": self.night,
+                                         "cpu_limit": self.cpu.usable})
 
     def set_blocked(self, reason):
         if reason != self.blocked:
@@ -179,11 +242,13 @@ class Runner:
             status = status._replace(state="running", pause="")
             self.store.set_status(job, status)
         if status.pause != "hold":
-            action = jobs.thermal_action(self.read_temp(), paused=status.state == "paused")
+            hot, cool = (jobs.NIGHT_HOT, jobs.NIGHT_COOL) if self.night else (jobs.HOT, jobs.COOL)
+            action = jobs.thermal_action(self.read_temp(), paused=status.state == "paused", hot=hot, cool=cool)
             if action == "stop":
                 self.signal(signal.SIGSTOP)
-                self.store.set_status(job, status._replace(state="paused", pause="heat"))
-                return log(f"job {job} paused: too hot")
+                reason = "night" if self.night else "heat"
+                self.store.set_status(job, status._replace(state="paused", pause=reason))
+                return log(f"job {job} paused: {reason}")
             if action == "cont":
                 self.signal(signal.SIGCONT)
                 status = status._replace(state="running", pause="")

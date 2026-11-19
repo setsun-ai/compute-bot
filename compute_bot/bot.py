@@ -45,9 +45,14 @@ HELP = (
     "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
     "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
     "/co 3 – raport postępu co 3 h · /cisza 23-7 – nocą bez dźwięku · /system\n"
+    "/noc 22-7 · /noc teraz – laptop liczy wolniej i ciszej, gdy ktoś śpi\n"
     "/panel – kolejka, wykresy i parametry w aplikacji · /funnel on|off – panel bez Tailscale\n"
     "/env – doinstaluj pakiety · /update · /rollback"
 )
+
+
+CPU_RULE = Path(__file__).resolve().parent.parent / "deploy" / "compute-bot-cpu.conf"
+NIGHT_PRESETS = ((22, 7), (23, 8), (0, 9))
 
 
 def esc(text):
@@ -71,7 +76,7 @@ def size_text(n):
 
 def system_info(home="."):
     """Load, temperature, memory, disk: what decides whether the laptop can take another job."""
-    from .runner import read_cpu_temp
+    from .runner import read_cpu_temp, read_fans
     lines = []
     temp = read_cpu_temp()
     lines.append(f"🌡️ CPU {temp:.0f} °C" if temp is not None else "🌡️ brak czujnika")
@@ -86,6 +91,9 @@ def system_info(home="."):
         lines.append(f"🧠 RAM wolne {size_text(free)} z {size_text(total)}")
     except (OSError, KeyError, ValueError):
         pass
+    fans = read_fans()
+    if fans:
+        lines.append("🌀 wentylator " + ", ".join(f"{rpm} obr/min" for rpm in fans))
     disk = shutil.disk_usage(home)
     lines.append(f"💾 dysk wolne {size_text(disk.free)} z {size_text(disk.total)}")
     try:
@@ -313,6 +321,8 @@ class Bot:
                 return self.try_example(rest)
             if action == "h":
                 return self.help_command(rest)
+            if action == "n":
+                return self.night_command(rest)
             if action == "u" and rest == "install":
                 return self.update_command()
         except ParamError as e:
@@ -338,6 +348,7 @@ class Bot:
                    "pomoc": self.help_command, "guide": self.guide_command, "przewodnik": self.guide_command,
                    "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
+                   "noc": self.night_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
                    "dolicz": self.extend_command, "panel": self.panel_command, "funnel": self.funnel_command,
                    "update": self.update_command, "rollback": self.rollback_command}
@@ -403,7 +414,7 @@ class Bot:
     def system_command(self, _rest=""):
         beat = self.store.runner_state()
         runner = (f"runner: {'działa' if self.runner_alive(beat) else 'NIE ODPOWIADA'}"
-                  + (" · ⏸️ pauza" if self.store.hold else ""))
+                  + (" · ⏸️ pauza" if self.store.hold else "") + (" · 🌙 noc (/noc)" if beat.get("night") else ""))
         self.say(self.system_info() + "\n" + runner + "\n" + self.queue_line())
 
     def report_command(self, rest):
@@ -429,6 +440,50 @@ class Bot:
         self.save()
         quiet = self.state["quiet"]
         self.say(f"🌙 Cisza nocna {quiet[0]}:00–{quiet[1]}:00." if quiet else "🔔 Cisza nocna wyłączona.")
+
+    def night_command(self, rest):
+        """Hours when someone sleeps next to the laptop: the runner slows the CPU so the fans stay quiet."""
+        night = self.store.night()
+        if rest == "off":
+            night = dict(jobs.NO_NIGHT)
+        elif rest == "teraz":
+            end = night["hours"][1] if night["hours"] else 7
+            night["until"] = jobs.next_hour(self.clock(), end)
+        elif rest:
+            try:
+                start, end = (int(x) % 24 for x in rest.split("-"))
+            except ValueError:
+                raise ParamError("Godziny nocy tak: /noc 22-7 (od 22 do 7). Albo /noc teraz, /noc off.") from None
+            night["hours"] = [start, end]
+        else:
+            return self.say(self.night_text(night), self.night_buttons())
+        self.store.set_night(night)
+        self.say(self.night_text(night))
+
+    def night_text(self, night):
+        now = self.clock()
+        if night == jobs.NO_NIGHT:
+            return "☀️ Tryb nocny wyłączony: laptop zawsze liczy pełną mocą. Włącz: /noc 22-7 albo /noc teraz."
+        parts = []
+        if night["hours"]:
+            parts.append(f"{night['hours'][0]}:00–{night['hours'][1]}:00")
+        if night["until"] > now:
+            parts.append("od teraz do " + time.strftime("%H:%M", time.localtime(night["until"])))
+        on = jobs.night_now(night, now, self.local_hour())
+        text = (f"🌙 Noc: {', '.join(parts) or 'bez godzin'} (teraz: {'cicho' if on else 'pełna moc'}).\n"
+                f"Nocą zadanie liczy na wolniejszym CPU (bez turbo, do 50% taktowania) i czeka, gdy laptop "
+                f"przekroczy {jobs.NIGHT_HOT:.0f} °C, więc wentylator zostaje cichy. Liczy się wtedy mniej więcej "
+                f"dwa razy wolniej.")
+        if self.store.runner_state().get("cpu_limit") is False:
+            text += ("\n\n⚠️ Laptop nie pozwala mi jeszcze zwolnić CPU, więc nocą działa tylko próg temperatury. "
+                     "Raz, na laptopie:\n"
+                     f"<code>sudo cp {CPU_RULE} /etc/tmpfiles.d/ &amp;&amp; "
+                     f"sudo systemd-tmpfiles --create /etc/tmpfiles.d/{CPU_RULE.name}</code>")
+        return text
+
+    def night_buttons(self):
+        presets = [(f"{a}–{b}", f"n:{a}-{b}") for a, b in NIGHT_PRESETS]
+        return keyboard([[("🌙 Od teraz do rana", "n:teraz")], presets, [("☀️ Wyłącz", "n:off")]])
 
     def hold_command(self, _rest=""):
         self.store.set_hold(True)
@@ -629,7 +684,8 @@ class Bot:
         now = self.clock()
         changed = False
         for job, status in self.store.statuses().items():
-            key = f"{status.state}:{status.attempt}"
+            state = "running" if status.pause == "night" else status.state  # night pauses come and go quietly
+            key = f"{state}:{status.attempt}"
             before = self.state["announced"].get(str(job))
             if key != before:
                 self.state["announced"][str(job)] = key
@@ -645,6 +701,7 @@ class Bot:
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
                              (f": {esc(status.progress)}" if status.progress else ""))
         changed |= self.check_runner()
+        changed |= self.check_reboot()
         changed |= self.check_for_update(now)
         for closed in (self.store.root / "staging").glob(f"*/{actions.CLOSED}"):
             self.drop(closed.parent.name)  # started or discarded in the Mini App (its own cards too)
@@ -694,6 +751,25 @@ class Bot:
             self.say("✅ Runner znowu działa.")
         elif before == "disk":
             self.say("✅ Miejsce na dysku jest, kolejka rusza.")
+        return True
+
+    def check_reboot(self):
+        """Once per boot after one the laptop did on its own (it sometimes resets itself at night)."""
+        beat = self.store.runner_state()
+        restart, boot = beat.get("restart"), beat.get("boot")
+        if not restart or boot == self.state.get("boot"):
+            return False
+        self.state["boot"] = boot
+        at, after = restart["at"], restart["after"]
+        clock = lambda t: time.strftime("%d.%m %H:%M", time.localtime(t))  # noqa: E731
+        text = (f"🔌 Laptop uruchomił się od nowa ({clock(at)}). Ostatni znak życia: {clock(after)}, "
+                f"przerwa {duration(at - after)}.")
+        if restart.get("jobs"):
+            names = ", ".join(f"#{job}" for job in restart["jobs"])
+            text += (f"\n{names} wraca do kolejki. GROMACS i OpenMM liczą dalej od ostatniego checkpointu "
+                     "(tracisz najwyżej kilka minut); skrypt run.sh zaczyna od początku, chyba że sam pomija "
+                     "gotowe etapy.")
+        self.say(text)
         return True
 
     def announce(self, job, status, before):

@@ -33,6 +33,8 @@ STATES = ("queued", "running", "paused", "done", "failed", "cancelled")
 FINAL = frozenset(("done", "failed", "cancelled"))
 MAX_ATTEMPTS = 3  # starts after a crash or reboot, before the job is given up
 HOT, COOL = 92.0, 75.0  # °C: stop the job at HOT, let it go on below COOL
+NIGHT_HOT, NIGHT_COOL = 70.0, 60.0  # °C at night: the fans stay slow below this
+NO_NIGHT = {"hours": None, "until": 0}  # hours: [start, end) local; until: "night from now" ends then (epoch)
 MAX_UNPACKED = 2 * 1024 ** 3
 
 
@@ -258,6 +260,26 @@ def thermal_action(temp, paused, hot=HOT, cool=COOL):
     return None
 
 
+def night_now(night, now, hour):
+    """Whether the laptop should be quiet: inside the owner's hours, or before the end of a "night from now"."""
+    if now < night.get("until", 0):
+        return True
+    hours = night.get("hours")
+    if not hours:
+        return False
+    start, end = hours
+    return start <= hour < end if start < end else hour >= start or hour < end
+
+
+def next_hour(now, hour):
+    """The next moment the local clock shows HOUR:00."""
+    day = time.localtime(now)
+    moment = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, hour, 0, 0, 0, 0, -1))
+    if moment <= now:
+        moment = time.mktime((day.tm_year, day.tm_mon, day.tm_mday + 1, hour, 0, 0, 0, 0, -1))
+    return moment
+
+
 GMX_ETA = re.compile(r"step (\d+), will finish (.+?)\s*$")
 
 
@@ -275,8 +297,12 @@ def progress_from_log(text):
 # --- the store ---------------------------------------------------------------------------------------
 
 def write_json(path, value):
+    """Old or new content, never half of it, even when the power goes: the laptop sometimes resets itself."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(value, ensure_ascii=False, indent=1))
+    with open(tmp, "w") as f:
+        f.write(json.dumps(value, ensure_ascii=False, indent=1))
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, path)
 
 
@@ -407,6 +433,17 @@ class Store:
     @property
     def hold(self):
         return (self.root / "hold").exists()
+
+    def night(self):
+        """The owner's quiet hours (written by the bot and the panel, read by the runner)."""
+        try:
+            return {**NO_NIGHT, **json.loads((self.root / "night.json").read_text())}
+        except (FileNotFoundError, ValueError):
+            return dict(NO_NIGHT)
+
+    def set_night(self, value):
+        self.root.mkdir(parents=True, exist_ok=True)
+        write_json(self.root / "night.json", {**NO_NIGHT, **value})
 
     def runner_state(self):
         try:

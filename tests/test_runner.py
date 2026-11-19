@@ -3,7 +3,7 @@ import sys
 import time
 
 from compute_bot import jobs
-from compute_bot.runner import Runner
+from compute_bot.runner import NIGHT_PERF, CpuLimit, Runner
 
 
 class Thermometer:
@@ -195,3 +195,95 @@ def test_fetch_downloads_then_runs_and_skips_what_is_already_there(tmp_path):
     run_until(runner, store, job, jobs.FINAL)
     assert len(hits) == 1  # the second run found the file complete
     server.shutdown()
+
+
+# --- quiet nights -------------------------------------------------------------------------------------
+
+def night_runner(tmp_path, temp=None, pstate=True):
+    """A runner whose whole day is night, with a fake intel_pstate folder it may write to."""
+    store = jobs.Store(tmp_path / "home")
+    folder = tmp_path / "pstate"
+    if pstate:
+        folder.mkdir()
+        (folder / "no_turbo").write_text("0\n")
+        (folder / "max_perf_pct").write_text("100\n")
+    runner = Runner(store, python=sys.executable, threads=3, read_temp=temp or Thermometer(),
+                    cpu=CpuLimit(folder))
+    store.set_night({"hours": None, "until": time.time() + 3600})
+    return store, runner, folder
+
+
+def test_at_night_a_running_job_gets_a_slower_cpu_and_the_day_gets_it_back(tmp_path):
+    store, runner, pstate = night_runner(tmp_path)
+    job = script(store, "sleep 0.4")
+    run_until(runner, store, job, {"running"})
+    runner.tick()
+    assert (pstate / "no_turbo").read_text().strip() == "1"
+    assert int((pstate / "max_perf_pct").read_text()) == NIGHT_PERF
+    assert store.runner_state()["night"] is True
+    run_until(runner, store, job, jobs.FINAL)
+    runner.tick()
+    assert (pstate / "no_turbo").read_text().strip() == "0"
+    assert (pstate / "max_perf_pct").read_text().strip() == "100"
+
+
+def test_morning_lifts_the_limit_while_the_job_still_runs(tmp_path):
+    store, runner, pstate = night_runner(tmp_path)
+    job = script(store, "sleep 1")
+    run_until(runner, store, job, {"running"})
+    runner.tick()
+    store.set_night(jobs.NO_NIGHT)
+    runner.tick()
+    assert (pstate / "max_perf_pct").read_text().strip() == "100"
+    assert store.runner_state()["night"] is False
+
+
+def test_at_night_a_lower_temperature_pauses_the_job_quietly(tmp_path):
+    temp = Thermometer(jobs.NIGHT_HOT + 1)
+    store, runner, _ = night_runner(tmp_path, temp)
+    job = script(store, "sleep 0.3")
+    status = run_until(runner, store, job, {"paused"})
+    assert status.pause == "night"
+    temp.temp = jobs.NIGHT_COOL - 1
+    assert run_until(runner, store, job, jobs.FINAL).state == "done"
+
+
+def test_the_same_temperature_by_day_does_not_pause(tmp_path):
+    store, runner = make(tmp_path, Thermometer(jobs.NIGHT_HOT + 1))
+    job = script(store, "sleep 0.2")
+    run_until(runner, store, job, {"running"})
+    time.sleep(0.1)
+    runner.tick()
+    assert store.status(job).state != "paused"
+
+
+def test_without_access_to_the_cpu_setting_the_runner_says_so_and_still_runs(tmp_path):
+    store, runner, _ = night_runner(tmp_path, pstate=False)
+    job = script(store, "true")
+    assert run_until(runner, store, job, jobs.FINAL).state == "done"
+    runner.heartbeat(force=True)
+    assert store.runner_state()["cpu_limit"] is False
+
+
+# --- after a reboot ---------------------------------------------------------------------------------------
+
+def test_a_new_boot_is_reported_with_the_last_sign_of_life_and_the_jobs_put_back(tmp_path):
+    store = jobs.Store(tmp_path)
+    store.set_runner_state({"time": 1000.0, "boot": "old-boot", "job": 1})
+    job = script(store, "true")
+    store.set_status(job, jobs.Status("running", attempt=1, started=900.0))
+    runner = Runner(store, python=sys.executable, threads=3, read_temp=Thermometer(), boot_id=lambda: "new-boot")
+    runner.recover()
+    runner.heartbeat(force=True)
+    state = store.runner_state()
+    assert state["boot"] == "new-boot"
+    assert state["restart"]["after"] == 1000.0 and state["restart"]["jobs"] == [job]
+
+
+def test_a_runner_restart_without_a_reboot_is_not_a_reboot(tmp_path):
+    store = jobs.Store(tmp_path)
+    store.set_runner_state({"time": 1000.0, "boot": "same"})
+    runner = Runner(store, python=sys.executable, threads=3, read_temp=Thermometer(), boot_id=lambda: "same")
+    runner.recover()
+    runner.heartbeat(force=True)
+    assert store.runner_state()["restart"] is None
