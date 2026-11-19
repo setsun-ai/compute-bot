@@ -1,6 +1,6 @@
 # Changelog
 
-## Niewydane
+## 0.2.2 (2026-11)
 
 - **Tryb nocny** `/noc 22-7`, `/noc teraz`, `/noc off` (z przyciskami): nocą zadanie liczy na wolniejszym CPU
   (bez turbo, do 50% taktowania) i czeka powyżej 70 °C, żeby wentylator nie hałasował, gdy ktoś śpi. Ograniczenie
