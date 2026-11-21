@@ -285,3 +285,14 @@ def test_the_server_stops_for_a_newer_version_so_systemd_starts_the_new_one(tmp_
 
     threading.Thread(target=run, daemon=True).start()
     assert done.wait(5) and len(asked) == 2
+
+
+def test_job_detail_has_the_copy_command_from_the_bots_settings(server, tmp_path):
+    store, base, app = server
+    store.create("script", "run.sh", "a.zip", {}, {"run.sh": b"true"})
+    assert call(base, "/api/jobs/1")[1]["copy"] == ""  # no laptop address known
+    app.ssh_target = "student@laptop.example.ts.net"
+    assert "student@laptop.example.ts.net:" in call(base, "/api/jobs/1")[1]["copy"]
+    (tmp_path / "bot.json").write_text(json.dumps({"copy": {"host": "vostro", "to": "~/md"}}))
+    copy = call(base, "/api/jobs/1")[1]["copy"]
+    assert copy.startswith("mkdir -p ~/md/bot_0001 && rsync -av") and "vostro:" in copy

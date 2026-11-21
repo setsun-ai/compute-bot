@@ -164,6 +164,9 @@ md_step md  -f md.mdp  -c npt.gro -t npt.cpt -p topol.top
 
 Skończony etap jest pomijany, przerwany wznawia się z checkpointu.  
 
+**Raporty „liczy się”**  
+Co 3 h bot pisze, jak idzie długie zadanie. Przyciski pod raportem: 🔕 bez raportów, co 6 h, co 12 h (albo `/co 2`). Start, koniec i błędy przychodzą zawsze.  
+
 **Ile zostało**  
 Bot sam czyta postęp bieżącego przebiegu z jego pliku `.log` (procent i godzina końca), także gdy mdrun pisze do pliku. Postęp całości zna tylko skrypt: niech wypisuje np. `echo "PROGRESS: przebieg 7/30"` – bot i panel pokażą to razem z postępem przebiegu.  
 
@@ -178,7 +181,10 @@ Brak karty graficznej: AlphaFold, ESMFold i trenowanie dużych sieci zostają na
 **Co przychodzi po zakończeniu**  
 1. Podsumowanie (`summary.txt`) – najważniejsze liczby słowami.  
 2. Do czterech najważniejszych wykresów.  
-3. `wyniki_NNNN.zip` – tabele CSV, wszystkie wykresy, log.  
+3. `wyniki_NNNN.zip` – tabele CSV, wszystkie wykresy, log. Gdy wszystko się nie mieści, w zipie jest najpierw folder `wyniki/`, potem tabele i wykresy; trajektorie i pliki pośrednie zostają na laptopie, a bot podaje jedno polecenie, które kopiuje całe zadanie.  
+
+**Całe zadanie na komputer**  
+`/kopia 3` daje gotowe polecenie do terminala (`mkdir` + `rsync`, bez checkpointów; powtórzone dociąga tylko brakujące pliki). Raz ustaw, skąd i dokąd: `/kopia vostro ~/md` (HOST jak w `ssh HOST`) – zadanie trafi do `~/md/bot_0003`. W panelu to samo jest pod listą plików zadania.  
 
 **Gdy plik jest za duży** (Telegram: 50 MB na plik)  
 • Do 50 MB, ale poza zipem: `/get 3 gromacs/md.xtc`.  
@@ -193,7 +199,7 @@ Pełna trajektoria bywa duża, dlatego w `wyniki/` jest też lekka wersja samego
 `/jobs` → `/job 3` → 📦 Wyniki. Pliki leżą na laptopie, dopóki ich nie usuniesz.  
 
 **Miejsce na dysku**  
-`/system` pokazuje wolne miejsce. Poniżej 2 GB nowe zadania czekają, a bot o tym pisze. `/usun 3` usuwa jedno zadanie z wynikami, `/usun stare` – skończone ponad 7 dni temu (zawsze z potwierdzeniem). Zanim usuniesz, pobierz to, co potrzebne.  
+`/miejsce` pokazuje zadania od największego, z przyciskami: 🧹 odchudza (usuwa checkpointy, kopie zapasowe GROMACS-a, zrzuty po awarii – wyniki i trajektorie zostają) i 🗑️ usuwa. Poniżej 2 GB wolnego nowe zadania czekają, a bot o tym pisze. `/usun 3` usuwa jedno zadanie z wynikami, `/usun stare` – skończone ponad 7 dni temu (zawsze z potwierdzeniem). Zanim usuniesz, pobierz to, co potrzebne.  
 
 ## 🖥 Panel, Tailscale i SSH
 

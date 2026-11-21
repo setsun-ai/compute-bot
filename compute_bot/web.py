@@ -24,7 +24,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import VERSION, actions, examples, guide, jobs, links, updater
+from . import VERSION, actions, examples, guide, jobs, links, results, updater
 from .recipes import RECIPES, ParamError, quick_values
 
 PAGE = Path(__file__).resolve().parent / "web" / "index.html"
@@ -67,8 +67,9 @@ def recipes_json():
 class App:
     """Requests → JSON answers; the HTTP layer below only parses and writes."""
 
-    def __init__(self, store, token, owner, system_info, clock=time.time):
+    def __init__(self, store, token, owner, system_info, clock=time.time, ssh_target=None):
         self.store, self.token, self.owner = store, token, owner
+        self.ssh_target = ssh_target  # user@host from remote.sh, for the copy command
         self.send_document = self.telegram_document
         self.system_info, self.clock = system_info, clock
         self.failures, self.lock = {}, threading.Lock()
@@ -123,7 +124,18 @@ class App:
         return {**job_json(self.store, spec),
                 "summary": summary.read_text(errors="replace")[:20000] if summary.exists() else "",
                 "highlights": highlights.read_text().split()[:8] if highlights.exists() else [],
-                "files": [{"path": str(p.relative_to(work)), "size": size} for p, size in self.store.outputs(job)]}
+                "files": [{"path": str(p.relative_to(work)), "size": size} for p, size in self.store.outputs(job)],
+                "copy": self.copy_line(job)}
+
+    def copy_line(self, job):
+        """The bot's /kopia N line: the bot owns the settings (bot.json), the panel only reads them."""
+        try:
+            settings = json.loads((self.store.root / "bot.json").read_text()).get("copy") or {}
+        except (OSError, ValueError):
+            settings = {}
+        host = settings.get("host") or self.ssh_target
+        to = settings.get("to") or results.COPY_TO
+        return results.copy_command(host, self.store.work(job), to, job) if host else ""
 
     def drafts(self):
         try:
@@ -380,7 +392,8 @@ def main():
         return 2
     home = Path(os.environ.get("COMPUTE_HOME", "."))
     port = int(os.environ.get("WEB_PORT", "8787"))
-    app = App(jobs.Store(home), token, int(owner), lambda: system_json(home))
+    app = App(jobs.Store(home), token, int(owner), lambda: system_json(home),
+              ssh_target=os.environ.get("SSH_TARGET") or None)
     print(f"compute-web {VERSION} on 127.0.0.1:{port}", flush=True)
     serve(make_server(app, "127.0.0.1", port), lambda: updater.restart_wanted(home))
     print("newer version installed, restarting", flush=True)

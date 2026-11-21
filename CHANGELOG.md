@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4 (2026-11)
+
+- **Zip z wynikami, gdy wszystko się nie mieści:** najpierw `wyniki/` (i `summary.txt`, wyróżnione wykresy), potem
+  tabele i wykresy z całego zadania; trajektorie, struktury i pliki pośrednie zostają na laptopie, checkpointy nigdy
+  nie trafiają do zipa. Zamiast listy setek `/get …` bot podaje jedno polecenie `mkdir -p … && rsync …`.
+- **`/kopia N`** – gotowe polecenie rsync dla zadania (bez `*.cpt` i kopii `#…#`); `/kopia vostro ~/md/met` ustawia
+  host i folder docelowy (`~/md/met/bot_NNNN`). W panelu: „💻 Całe zadanie na komputer” z przyciskiem kopiowania.
+- **`/miejsce`** – zadania od największego; 🧹 odchudza (checkpointy, kopie zapasowe, zrzuty po awarii), 🗑️ usuwa.
+- **Raporty postępu** mają przyciski 🔕 bez raportów / co 6 h / co 12 h; `/co` pokazuje ustawienie z przyciskami.
+
 ## 0.2.3 (2026-11)
 
 - **Panel po `/update` przechodzi na nową wersję.** Wcześniej `/update` restartował bota i runnera, a panel dalej

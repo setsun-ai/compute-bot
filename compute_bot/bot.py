@@ -20,7 +20,7 @@ import time
 import zipfile
 from pathlib import Path, PurePosixPath
 
-from . import VERSION, actions, drafts, examples, guide, jobs, links
+from . import VERSION, actions, drafts, examples, guide, jobs, links, results
 from .drafts import keyboard
 from .recipes import RECIPES, ParamError
 from .telegram import Telegram, TelegramError
@@ -43,7 +43,8 @@ HELP = (
     "/guide – przewodnik krok po kroku z przykładami do wypróbowania\n"
     "/jobs – kolejka · /job N · /log N · /get N [plik] · /cancel N\n"
     "/retry N [klucz=wartość] – jeszcze raz, też ze zmianą · /top N – następne w kolejce\n"
-    "/usun N · /usun stare – zwolnij dysk · /pauza · /wznow – wstrzymaj wszystko\n"
+    "/usun N · /usun stare · /miejsce – co zajmuje dysk · /pauza · /wznow – wstrzymaj wszystko\n"
+    "/kopia N – polecenie rsync: całe zadanie na komputer · /kopia HOST ~/folder – ustawienia\n"
     "/co 3 – raport postępu co 3 h · /cisza 23-7 – nocą bez dźwięku · /system\n"
     "/noc 22-7 · /noc teraz – laptop liczy wolniej i ciszej, gdy ktoś śpi\n"
     "/panel – kolejka, wykresy i parametry w aplikacji · /funnel on|off – panel bez Tailscale\n"
@@ -53,6 +54,8 @@ HELP = (
 
 CPU_RULE = Path(__file__).resolve().parent.parent / "deploy" / "compute-bot-cpu.conf"
 NIGHT_PRESETS = ((22, 7), (23, 8), (0, 9))
+REPORT_BUTTONS = [[("🔕 Bez raportów", "r:0"), ("co 6 h", "r:6"), ("co 12 h", "r:12")]]
+FEW_LEFT = 5  # left out of the zip: up to this many get their own /get line, more get one copy command
 
 
 def esc(text):
@@ -65,6 +68,14 @@ def duration(seconds):
     if hours >= 24:
         return f"{hours // 24} d {hours % 24} h"
     return f"{hours} h {rest // 60} min" if hours else f"{rest // 60} min {rest % 60} s"
+
+
+def files_text(n):
+    """1 plik, 2 pliki, 5 plików, 22 pliki, 112 plików."""
+    if n == 1:
+        return "1 plik"
+    few = n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14)
+    return f"{n} {'pliki' if few else 'plików'}"
 
 
 def size_text(n):
@@ -117,7 +128,7 @@ class Bot:
         fresh = not self.state_path.exists()
         self.local_hour = lambda: time.localtime(self.clock()).tm_hour
         self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "drafts": {}, "open_draft": None,
-                      "quiet": [23, 7], "runner_alert": ""}
+                      "quiet": [23, 7], "runner_alert": "", "copy": {"host": None, "to": results.COPY_TO}}
         if not fresh:
             self.state.update(json.loads(self.state_path.read_text()))
         else:  # first start (or lost state): don't repeat news about old jobs
@@ -323,6 +334,10 @@ class Bot:
                 return self.help_command(rest)
             if action == "n":
                 return self.night_command(rest)
+            if action == "r":
+                return self.report_command(rest)
+            if action == "o" and rest.isdigit():
+                return self.slim_confirmed(int(rest))
             if action == "u" and rest == "install":
                 return self.update_command()
         except ParamError as e:
@@ -349,6 +364,8 @@ class Bot:
                    "jobs": self.list_jobs, "kolejka": self.list_jobs,
                    "system": self.system_command, "co": self.report_command, "cisza": self.quiet_command,
                    "noc": self.night_command,
+                   "kopia": self.copy_command, "rsync": self.copy_command, "miejsce": self.disk_command,
+                   "dysk": self.disk_command,
                    "pauza": self.hold_command, "wznow": self.release_command, "url": self.url_command,
                    "dolicz": self.extend_command, "panel": self.panel_command, "funnel": self.funnel_command,
                    "update": self.update_command, "rollback": self.rollback_command}
@@ -419,12 +436,15 @@ class Bot:
 
     def report_command(self, rest):
         try:
-            hours = float(rest.replace(",", "."))
+            hours = max(0.0, float(rest.replace(",", ".")))
         except ValueError:
-            return self.say(f"Raport co {self.state['report_hours']:g} h. Zmiana: /co 2 (0 = wyłącz).")
-        self.state["report_hours"] = max(0.0, hours)
+            now = self.state["report_hours"]
+            return self.say(f"Raport „liczy się” {f'co {now:g} h' if now else 'wyłączony'}. Zmiana: /co 2 "
+                            "(0 = wyłącz) albo przyciskiem.", keyboard(REPORT_BUTTONS))
+        self.state["report_hours"] = hours
         self.save()
-        self.say("Raporty postępu wyłączone." if not hours else f"Raport postępu co {hours:g} h.")
+        self.say("🔕 Raporty postępu wyłączone (start, koniec i błędy nadal przychodzą). Włącz: /co 3."
+                 if not hours else f"Raport postępu co {hours:g} h.")
 
     def quiet_command(self, rest):
         if rest == "off":
@@ -689,7 +709,7 @@ class Bot:
                     changed = True
                     elapsed = duration(now - (status.started or now))
                     self.say(f"⚙️ <b>#{job}</b> liczy od {elapsed}" +
-                             (f": {esc(status.progress)}" if status.progress else ""))
+                             (f": {esc(status.progress)}" if status.progress else ""), keyboard(REPORT_BUTTONS))
         changed |= self.check_runner()
         changed |= self.check_reboot()
         changed |= self.check_for_update(now)
@@ -807,6 +827,8 @@ class Bot:
                              files={"photo": (path.name, path.read_bytes())})
         archive, left_out = self.results_zip(job)
         self.send_file(f"wyniki_{job:04d}.zip", archive, f"#{job}")
+        if len(left_out) > FEW_LEFT:
+            return self.say(*self.left_on_laptop(job, left_out))
         small = [(rel, size) for rel, size in left_out if size <= MAX_UPLOAD]
         big = [(rel, size) for rel, size in left_out if size > MAX_UPLOAD]
         if small:
@@ -817,19 +839,102 @@ class Bot:
             self.say(*self.big_files(job, big))
 
     def results_zip(self, job):
-        """Smallest files first until the zip would get too big for Telegram; the log always goes in."""
+        """Everything when it fits; otherwise results, tables and plots first (results.pack). The log always."""
         work = self.store.work(job)
+        highlights = work / "highlights.txt"
+        shown = highlights.read_text().split() if highlights.exists() else []
+        files = [(str(path.relative_to(work)), size) for path, size in self.store.outputs(job)]
+        included, left_out = results.pack(files, self.zip_budget, shown)
         out = io.BytesIO()
-        left_out = []
         with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as archive:
             archive.writestr("log.txt", self.store.log_tail(job, 2 * 1024 ** 2))
-            for path, size in self.store.outputs(job):
-                rel = str(path.relative_to(work))
-                if out.tell() + size > self.zip_budget:
-                    left_out.append((rel, size))
-                    continue
-                archive.write(path, rel)
+            for rel, _ in included:
+                archive.write(work / rel, rel)
         return out.getvalue(), left_out
+
+    def left_on_laptop(self, job, left_out):
+        """Many files didn't fit: say what stayed and give one command that copies the whole job."""
+        size, count = sum(s for _, s in left_out), files_text(len(left_out))
+        verb = "zostały" if count.endswith("pliki") else "zostało"
+        text = (f"📎 W zipie są wyniki, tabele i wykresy. Na laptopie {verb} {count} "
+                f"({size_text(size)}: trajektorie, struktury, pliki pośrednie).\n")
+        command = self.copy_line(job)
+        if command:
+            text += f"Całe zadanie na komputer – wklej w terminalu:\n<code>{esc(command)}</code>"
+        else:
+            text += ("Pojedynczy plik: <code>/get N ścieżka</code>. Całość jednym poleceniem: ustaw "
+                     "<code>/kopia HOST ~/folder</code> (HOST – nazwa laptopa w Tailscale albo alias z ~/.ssh/config).")
+        return text, keyboard([[("🧹 Miejsce na laptopie", f"j:{job}:miejsce")]])
+
+    # --- copying and disk -------------------------------------------------------------------------------
+
+    def copy_line(self, job):
+        settings = self.state["copy"]
+        host = settings["host"] or self.ssh_target
+        return results.copy_command(host, self.store.work(job), settings["to"], job) if host else ""
+
+    def copy_command(self, rest):
+        """/kopia N: the rsync line for a job; /kopia [HOST] [~/folder]: where it copies from and to."""
+        if rest.isdigit():
+            job = int(rest)
+            if job not in self.store.ids():
+                return self.say(f"Nie ma zadania #{job}. Lista: /jobs")
+            line = self.copy_line(job)
+            if not line:
+                return self.say("Nie znam adresu laptopa. Ustaw raz: <code>/kopia HOST ~/folder</code>, np. "
+                                "<code>/kopia vostro ~/md</code> (HOST jak w <code>ssh HOST</code>).")
+            return self.say(f"💻 #{job} na komputer – wklej w terminalu (bez checkpointów):\n<code>{esc(line)}</code>\n"
+                            "Kopiuje tylko to, czego jeszcze nie masz, więc można powtarzać.")
+        settings = self.state["copy"]
+        for word in rest.split():
+            if word.startswith(("~", "/", ".")):
+                settings["to"] = word
+            else:
+                settings["host"] = word
+        if rest:
+            self.save()
+        host = settings["host"] or self.ssh_target or "(brak – podaj HOST)"
+        self.say(f"💻 Kopie: z <b>{esc(host)}</b> do <code>{esc(settings['to'])}/bot_NNNN</code>.\n"
+                 "Zmiana: <code>/kopia vostro ~/md/met</code>. Polecenie dla zadania: <code>/kopia N</code>.")
+
+    def disk_command(self, _rest=""):
+        """What fills the laptop's disk, biggest job first, with buttons to slim or remove finished ones."""
+        sizes = []
+        for job in self.store.ids():
+            files = [(str(p.relative_to(self.store.work(job))), s) for p, s in self.store.outputs(job)]
+            junk = sum(s for rel, s in files if results.is_junk(rel))
+            sizes.append((sum(s for _, s in files), junk, job))
+        sizes.sort(reverse=True)
+        import shutil
+        disk = shutil.disk_usage(self.store.root)
+        lines = [f"💾 Wolne {size_text(disk.free)} z {size_text(disk.total)}; zadania zajmują "
+                 f"{size_text(sum(s for s, _, _ in sizes))}."]
+        rows = []
+        for total, junk, job in sizes[:10]:
+            status = self.store.status(job)
+            slim = f", do odchudzenia {size_text(junk)}" if junk else ""
+            lines.append(f"{ICONS[status.state]} #{job} {esc(self.store.spec(job).name)} · {size_text(total)}{slim}")
+            if status.state in jobs.FINAL and len(rows) < 5:
+                row = [(f"🗑️ #{job}", f"j:{job}:usun")]
+                if junk:
+                    row.insert(0, (f"🧹 #{job} −{size_text(junk)}", f"o:{job}"))
+                rows.append(row)
+        if len(sizes) > 10:
+            lines.append(f"… i {len(sizes) - 10} mniejszych")
+        lines.append("🧹 odchudza: usuwa checkpointy, kopie zapasowe GROMACS-a i zrzuty po awarii; wyniki i "
+                     "trajektorie zostają (po tym /dolicz nie wznowi dynamiki). Przed usunięciem: /kopia N.")
+        self.say("\n".join(lines), keyboard(rows) if rows else None)
+
+    def slim_confirmed(self, job):
+        if job not in self.store.ids() or self.store.status(job).state not in jobs.FINAL:
+            return self.say(f"#{job} nie jest skończone albo go nie ma.")
+        work = self.store.work(job)
+        freed = 0
+        for path, size in self.store.outputs(job):
+            if results.is_junk(str(path.relative_to(work))):
+                path.unlink()
+                freed += size
+        self.say(f"🧹 #{job}: zwolnione {size_text(freed)}.")
 
     # --- updating itself --------------------------------------------------------------------------------
 

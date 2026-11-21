@@ -687,3 +687,88 @@ def test_a_reboot_is_reported_once_with_the_gap_and_the_jobs_put_back(env):
     sent = len(api.calls)
     bot.tick()
     assert len(api.calls) == sent
+
+
+# --- progress reports you can switch off or space out ------------------------------------------------------
+
+def running_job(store, clock):
+    job = store.create("script", "run.sh", "x.zip", {}, {"run.sh": b"true"}).id
+    store.set_status(job, jobs.Status("running", attempt=1, started=clock.now, progress="NPT 40%"))
+    return job
+
+
+def test_a_progress_report_carries_buttons_to_space_it_out_or_stop_it(env):
+    bot, api, store, clock = env
+    running_job(store, clock)
+    bot.tick()
+    clock.now += 3 * 3600
+    bot.tick()
+    taps = [b["callback_data"] for b in last_buttons(api)]
+    assert {"r:0", "r:6", "r:12"} <= set(taps)
+    tap(bot, "r:0")
+    assert bot.state["report_hours"] == 0
+    count = len(api.calls)
+    clock.now += 24 * 3600
+    bot.tick()
+    assert len(api.calls) == count
+
+
+def test_report_setting_alone_shows_it_with_buttons(env):
+    bot, api, store, clock = env
+    bot.handle_update(message("/co"))
+    assert "3 h" in api.last_text() and "r:0" in [b["callback_data"] for b in last_buttons(api)]
+    tap(bot, "r:6")
+    assert bot.state["report_hours"] == 6
+
+
+# --- many results: the zip keeps what matters, the rest is one rsync away ------------------------------------
+
+def many_results(store):
+    files = {f"runs/r{i:02d}/run.gro": b"g" * 50_000 for i in range(30)}
+    files.update({"wyniki/table.csv": b"a,b\n1,2\n", "wyniki/plot.png": b"png", "runs/r01/md.cpt": b"c" * 9000})
+    return finished_job(store, files)
+
+
+def test_with_many_results_the_zip_has_the_results_and_the_rest_comes_with_rsync(env):
+    bot, api, store, _ = env
+    bot.ssh_target = "student@laptop.example.ts.net"
+    bot.zip_budget = 600_000
+    job = many_results(store)
+    bot.tick()
+    names = zipfile.ZipFile(io.BytesIO(api.sent("sendDocument")[-1][2]["document"][1])).namelist()
+    assert "wyniki/table.csv" in names and "wyniki/plot.png" in names
+    assert not any(n.endswith(".gro") or n.endswith(".cpt") for n in names)
+    text = "\n".join(api.texts())
+    assert text.count("/get ") <= 5
+    assert (f"rsync -av --exclude '*.cpt' --exclude '#*#' student@laptop.example.ts.net:"
+            f"{store.work(job)}/ ~/compute-bot/bot_{job:04d}/") in text
+
+
+def test_copy_settings_and_the_command_for_one_job(env):
+    bot, api, store, _ = env
+    job = many_results(store)
+    bot.handle_update(message(f"/kopia {job}"))
+    assert "/kopia HOST" in api.last_text()  # no SSH address known yet
+    bot.handle_update(message("/kopia vostro ~/md/met"))
+    assert "vostro" in api.last_text() and "~/md/met" in api.last_text()
+    bot.handle_update(message(f"/kopia {job}"))
+    assert f"mkdir -p ~/md/met/bot_{job:04d} &amp;&amp; rsync -av" in api.last_text()
+    assert f"vostro:{store.work(job)}/ ~/md/met/bot_{job:04d}/" in api.last_text()
+
+
+# --- what fills the disk --------------------------------------------------------------------------------------
+
+def test_disk_view_lists_jobs_by_size_and_slimming_keeps_the_results(env):
+    bot, api, store, _ = env
+    small = finished_job(store, {"a.csv": b"1"})
+    big = finished_job(store, {"wyniki/t.csv": b"x", "md.cpt": b"c" * 200_000, "#topol.top.1#": b"t" * 1000,
+                               "md.xtc": b"x" * 300_000})
+    bot.handle_update(message("/miejsce"))
+    text = api.last_text()
+    assert text.index(f"#{big}") < text.index(f"#{small}")
+    assert f"o:{big}" in [b["callback_data"] for b in last_buttons(api)]
+    tap(bot, f"o:{big}")
+    work = store.work(big)
+    assert not (work / "md.cpt").exists() and not (work / "#topol.top.1#").exists()
+    assert (work / "wyniki/t.csv").exists() and (work / "md.xtc").exists()
+    assert "zwolnione" in api.last_text()
