@@ -1,6 +1,8 @@
 # Pushing a version tag (git tag v1.2.3 && git push origin v1.2.3) publishes a GitHub release: the tag must match
 # VERSION in compute_bot/__init__.py, lint, core and recipe tests must pass, and the notes are the "## 1.2.3" section of
 # CHANGELOG.md. The bot's /update installs the latest release.
+# Recipe tests take 15-25 minutes; when CI already passed for the very commit the tag points to (same SHA = the same
+# files, nothing mixed in), they are not run a second time. A tag on a commit CI hasn't passed runs them here.
 name: Release
 
 on:
@@ -9,10 +11,29 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  check:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    outputs:
+      tested: ${{ steps.ci.outputs.tested }}
+    steps:
+      - name: Did CI (core and recipes) already pass for this commit?
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --commit "$GITHUB_SHA" \
+                   --status success --json databaseId --jq length)
+          echo "CI runs passed for $GITHUB_SHA: $passed"
+          if [ "${passed:-0}" -gt 0 ]; then echo "tested=true" >> "$GITHUB_OUTPUT"; else echo "tested=false" >> "$GITHUB_OUTPUT"; fi
+
   recipes:
     # 0.1.1 shipped with a failing recipe test because only the core ran here: a release needs both.
+    needs: check
+    if: needs.check.outputs.tested != 'true'
     timeout-minutes: 60
     runs-on: ubuntu-latest
     defaults:
@@ -30,7 +51,9 @@ jobs:
       - run: python -m pytest -q tests/recipes
 
   release:
-    needs: recipes
+    needs: [check, recipes]
+    # recipes skipped = CI already passed them for this commit
+    if: always() && needs.check.result == 'success' && (needs.recipes.result == 'success' || needs.recipes.result == 'skipped')
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
