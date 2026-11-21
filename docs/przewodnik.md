@@ -184,7 +184,7 @@ Brak karty graficznej: AlphaFold, ESMFold i trenowanie dużych sieci zostają na
 3. `wyniki_NNNN.zip` – tabele CSV, wszystkie wykresy, log. Gdy wszystko się nie mieści, w zipie jest najpierw folder `wyniki/`, potem tabele i wykresy; trajektorie i pliki pośrednie zostają na laptopie, a bot podaje jedno polecenie, które kopiuje całe zadanie.  
 
 **Całe zadanie na komputer**  
-`/kopia 3` daje gotowe polecenie do terminala (`mkdir` + `rsync`, bez checkpointów; powtórzone dociąga tylko brakujące pliki). Raz ustaw, skąd i dokąd: `/kopia vostro ~/md` (HOST jak w `ssh HOST`) – zadanie trafi do `~/md/bot_0003`. W panelu to samo jest pod listą plików zadania.  
+`/kopia 3` daje gotowe polecenie do terminala (`mkdir` + `rsync`, bez checkpointów; powtórzone dociąga tylko brakujące pliki). Raz ustaw, skąd i dokąd: `/kopia vostro ~/md` (HOST jak w `ssh HOST`) – zadanie trafi do `~/md/bot_0003`. W panelu to samo jest w zadaniu, w sekcji „💻 Całe zadanie na komputer”, a po skopiowaniu „✅ Skopiowałem – usuń z laptopa”.  
 
 **Gdy plik jest za duży** (Telegram: 50 MB na plik)  
 • Do 50 MB, ale poza zipem: `/get 3 gromacs/md.xtc`.  
@@ -199,7 +199,7 @@ Pełna trajektoria bywa duża, dlatego w `wyniki/` jest też lekka wersja samego
 `/jobs` → `/job 3` → 📦 Wyniki. Pliki leżą na laptopie, dopóki ich nie usuniesz.  
 
 **Miejsce na dysku**  
-`/miejsce` pokazuje zadania od największego, z przyciskami: 🧹 odchudza (usuwa checkpointy, kopie zapasowe GROMACS-a, zrzuty po awarii – wyniki i trajektorie zostają) i 🗑️ usuwa. Poniżej 2 GB wolnego nowe zadania czekają, a bot o tym pisze. `/usun 3` usuwa jedno zadanie z wynikami, `/usun stare` – skończone ponad 7 dni temu (zawsze z potwierdzeniem). Zanim usuniesz, pobierz to, co potrzebne.  
+`/miejsce` (w panelu: 💾 Miejsce na dysku) pokazuje zadania od największego, z przyciskami: 🧹 odchudza (usuwa checkpointy, kopie zapasowe GROMACS-a, zrzuty po awarii – wyniki i trajektorie zostają) i 🗑️ usuwa. Poniżej 2 GB wolnego nowe zadania czekają, a bot o tym pisze. `/usun 3` usuwa jedno zadanie z wynikami, `/usun stare` – skończone ponad 7 dni temu (zawsze z potwierdzeniem). Zanim usuniesz, pobierz to, co potrzebne.  
 
 ## 🖥 Panel, Tailscale i SSH
 

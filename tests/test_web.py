@@ -296,3 +296,36 @@ def test_job_detail_has_the_copy_command_from_the_bots_settings(server, tmp_path
     (tmp_path / "bot.json").write_text(json.dumps({"copy": {"host": "vostro", "to": "~/md"}}))
     copy = call(base, "/api/jobs/1")[1]["copy"]
     assert copy.startswith("mkdir -p ~/md/bot_0001 && rsync -av") and "vostro:" in copy
+
+
+def test_disk_view_and_slimming_from_the_panel(server):
+    store, base, _ = server
+    small = store.create("script", "run.sh", "a.zip", {}, {"run.sh": b"true"}).id
+    big = store.create("script", "run.sh", "b.zip", {}, {"run.sh": b"true"}).id
+    (store.work(big) / "md.cpt").write_bytes(b"c" * 5000)
+    (store.work(big) / "md.xtc").write_bytes(b"x" * 9000)
+    for job in (small, big):
+        store.set_status(job, jobs.Status("done", attempt=1, started=1.0, finished=2.0))
+    code, disk = call(base, "/api/disk")
+    assert code == 200 and [j["id"] for j in disk["jobs"]] == [big, small]
+    assert disk["jobs"][0]["junk"] == 5000 and disk["free"] > 0
+    assert call(base, f"/api/jobs/{big}")[1]["junk"] == 5000
+    code, slim = call(base, f"/api/jobs/{big}/slim", {})
+    assert code == 200 and slim["freed"] == 5000
+    assert not (store.work(big) / "md.cpt").exists() and (store.work(big) / "md.xtc").exists()
+
+
+def test_report_interval_from_the_panel(server):
+    store, base, _ = server
+    code, state = call(base, "/api/reports", {"hours": 6})
+    assert code == 200 and store.report_hours() == 6 and state["reports"] == 6
+    assert call(base, "/api/reports", {"hours": -1})[0] == 400
+
+
+def test_state_carries_a_recent_reboot_and_the_copy_settings(server, tmp_path):
+    store, base, _ = server
+    store.set_runner_state({"time": 1, "restart": {"after": 10.0, "at": 20.0, "jobs": [3]}})
+    (tmp_path / "bot.json").write_text(json.dumps({"copy": {"host": "vostro", "to": "~/md"}}))
+    state = call(base, "/api/state")[1]
+    assert state["runner"]["restart"] == {"after": 10.0, "at": 20.0, "jobs": [3]}
+    assert state["copy"] == {"host": "vostro", "to": "~/md"}

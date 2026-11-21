@@ -34,6 +34,7 @@ FINAL = frozenset(("done", "failed", "cancelled"))
 MAX_ATTEMPTS = 3  # starts after a crash or reboot, before the job is given up
 HOT, COOL = 92.0, 75.0  # °C: stop the job at HOT, let it go on below COOL
 NIGHT_HOT, NIGHT_COOL = 70.0, 60.0  # °C at night: the fans stay slow below this
+REPORT_HOURS = 3.0  # "still running" reports, until the owner changes it
 NO_NIGHT = {"hours": None, "until": 0}  # hours: [start, end) local; until: "night from now" ends then (epoch)
 MAX_UNPACKED = 2 * 1024 ** 3
 
@@ -55,7 +56,9 @@ class Status(NamedTuple):
     finished: float | None = None
     exit_code: int | None = None
     progress: str = ""
-    pause: str = ""  # while paused: "heat" or "hold"
+    pause: str = ""  # while paused: "heat", "night" or "hold"
+    temp_max: float | None = None  # hottest CPU reading while it ran
+    paused_s: float = 0.0  # seconds it waited for the CPU to cool (heat and night pauses, not the owner's hold)
 
 
 # --- what the owner typed and sent -------------------------------------------------------------------
@@ -515,6 +518,17 @@ class Store:
     def set_night(self, value):
         self.root.mkdir(parents=True, exist_ok=True)
         write_json(self.root / "night.json", {**NO_NIGHT, **value})
+
+    def report_hours(self):
+        """How often the bot says a long job is still running; 0 = never (written by the bot and the panel)."""
+        try:
+            return float(json.loads((self.root / "reports.json").read_text())["hours"])
+        except (FileNotFoundError, ValueError, KeyError, TypeError):
+            return REPORT_HOURS
+
+    def set_report_hours(self, hours):
+        self.root.mkdir(parents=True, exist_ok=True)
+        write_json(self.root / "reports.json", {"hours": max(0.0, float(hours))})
 
     def runner_state(self):
         try:

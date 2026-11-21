@@ -1,7 +1,16 @@
 # Changelog
 
-## 0.2.4 (2026-11)
+## 0.2.5 (2026-11)
 
+- **Panel ma wszystko, co bot:** sekcja „Ustawienia” (raporty „liczy się”: wyłączone / co 3 / 6 / 12 h; skąd i dokąd
+  kopiować wyniki), ekran **💾 Miejsce na laptopie** (zadania od największego, 🧹 odchudź, 🗑️ usuń, usuwanie
+  starszych niż 7 dni), w karcie stanu informacja o samoczynnym restarcie laptopa (przez 3 dni), w zadaniu sekcja
+  „💻 Całe zadanie na komputer” z kopiowaniem polecenia, „🧹 Odchudź” i „✅ Skopiowałem – usuń z laptopa”.
+- **Koniec zadania mówi, jak poszło:** ile trwały pauzy na ostygnięcie (z gorąca i nocne) i najwyższa temperatura
+  CPU – w wiadomości „gotowe” i w panelu.
+- **„✅ Skopiowałem – usuń z laptopa”** pod poleceniem rsync w bocie (z potwierdzeniem).
+- Interwał raportów żyje teraz w `reports.json` (ustawiają go bot i panel); stare ustawienie z `bot.json` przechodzi
+  samo.
 - **Zip z wynikami, gdy wszystko się nie mieści:** najpierw `wyniki/` (i `summary.txt`, wyróżnione wykresy), potem
   tabele i wykresy z całego zadania; trajektorie, struktury i pliki pośrednie zostają na laptopie, checkpointy nigdy
   nie trafiają do zipa. Zamiast listy setek `/get …` bot podaje jedno polecenie `mkdir -p … && rsync …`.

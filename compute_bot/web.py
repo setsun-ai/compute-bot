@@ -107,8 +107,8 @@ class App:
         return {"version": VERSION, "now": self.clock(), "hold": self.store.hold, "system": self.system_info(),
                 "max_attempts": jobs.MAX_ATTEMPTS, "queue": jobs.queue_order(statuses, self.store.priorities()),
                 "runner": {"alive": alive, **{k: beat.get(k) for k in ("time", "job", "blocked", "free", "threads",
-                                                                       "night", "cpu_limit")}},
-                "night": self.night(),
+                                                                       "night", "cpu_limit", "restart")}},
+                "night": self.night(), "reports": self.store.report_hours(), "copy": self.copy_settings(),
                 "jobs": [job_json(self.store, spec) for spec in reversed(self.store.specs()[-50:])]}
 
     def night(self):
@@ -125,17 +125,21 @@ class App:
                 "summary": summary.read_text(errors="replace")[:20000] if summary.exists() else "",
                 "highlights": highlights.read_text().split()[:8] if highlights.exists() else [],
                 "files": [{"path": str(p.relative_to(work)), "size": size} for p, size in self.store.outputs(job)],
-                "copy": self.copy_line(job)}
+                "copy": self.copy_line(job),
+                "junk": sum(size for p, size in self.store.outputs(job) if results.is_junk(str(p.relative_to(work))))}
 
-    def copy_line(self, job):
-        """The bot's /kopia N line: the bot owns the settings (bot.json), the panel only reads them."""
+    def copy_settings(self):
+        """The bot's /kopia settings (bot.json: the bot writes them, the panel only reads)."""
         try:
             settings = json.loads((self.store.root / "bot.json").read_text()).get("copy") or {}
         except (OSError, ValueError):
             settings = {}
-        host = settings.get("host") or self.ssh_target
-        to = settings.get("to") or results.COPY_TO
-        return results.copy_command(host, self.store.work(job), to, job) if host else ""
+        return {"host": settings.get("host") or self.ssh_target, "to": settings.get("to") or results.COPY_TO}
+
+    def copy_line(self, job):
+        settings = self.copy_settings()
+        host = settings["host"]
+        return results.copy_command(host, self.store.work(job), settings["to"], job) if host else ""
 
     def drafts(self):
         try:
@@ -181,6 +185,10 @@ class App:
             return [topic._asdict() for topic in guide.TOPICS]
         if parts == ["drafts"]:
             return self.drafts()
+        if parts == ["disk"]:
+            import shutil
+            usage = shutil.disk_usage(self.store.root)
+            return {"free": usage.free, "total": usage.total, "jobs": actions.disk(self.store)}
         job = self.job_id(parts)
         if len(parts) == 2:
             return self.job(job)
@@ -197,6 +205,15 @@ class App:
         parts = path.strip("/").split("/")[1:]
         if parts == ["night"]:
             self.store.set_night(jobs.night_change(self.store.night(), str(body.get("cmd", "")), self.clock()))
+            return self.state()
+        if parts == ["reports"]:
+            try:
+                hours = float(body.get("hours"))
+            except (TypeError, ValueError):
+                hours = -1
+            if not 0 <= hours <= 168:
+                raise ParamError("Raporty: liczba godzin od 0 (wyłączone) do 168.")
+            self.store.set_report_hours(hours)
             return self.state()
         if parts == ["hold"]:
             self.store.set_hold(bool(body.get("on")))
@@ -220,6 +237,8 @@ class App:
         if action == "remove":
             self.store.remove(job)
             return {"ok": True}
+        if action == "slim":
+            return {"freed": actions.slim(self.store, job)}
         if action == "cancel":
             self.store.request_cancel(job)
             return {"ok": True}

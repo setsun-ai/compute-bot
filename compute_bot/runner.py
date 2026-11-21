@@ -110,7 +110,7 @@ class Runner:
         self.night = False
         self.job = self.proc = self.log_file = None
         self.kill_at = None
-        self.last_progress = self.last_beat = 0.0
+        self.last_progress = self.last_beat = self.last_watch = 0.0
         self.blocked = ""
         self.free_space = lambda: shutil.disk_usage(store.root).free
 
@@ -206,6 +206,7 @@ class Runner:
                                                        finished=self.clock(), progress=str(e)))
             return
         self.job, self.kill_at = job, None
+        self.last_watch = self.clock()
         self.store.set_status(job, status._replace(state="running", attempt=status.attempt + 1,
                                                    started=status.started or self.clock()))
         log(f"job {job} started: {cmd}")
@@ -224,6 +225,9 @@ class Runner:
         if code is not None:
             return self.finish(code)
         now = self.clock()
+        if status.state == "paused" and status.pause in ("heat", "night"):
+            status = status._replace(paused_s=status.paused_s + now - self.last_watch)
+        self.last_watch = now
         if self.store.cancel_requested(job):
             if self.kill_at is None:
                 self.signal(signal.SIGCONT)
@@ -243,7 +247,10 @@ class Runner:
             self.store.set_status(job, status)
         if status.pause != "hold":
             hot, cool = (jobs.NIGHT_HOT, jobs.NIGHT_COOL) if self.night else (jobs.HOT, jobs.COOL)
-            action = jobs.thermal_action(self.read_temp(), paused=status.state == "paused", hot=hot, cool=cool)
+            temp = self.read_temp()
+            if temp is not None and (status.temp_max is None or temp > status.temp_max):
+                status = status._replace(temp_max=temp)
+            action = jobs.thermal_action(temp, paused=status.state == "paused", hot=hot, cool=cool)
             if action == "stop":
                 self.signal(signal.SIGSTOP)
                 reason = "night" if self.night else "heat"
@@ -255,9 +262,9 @@ class Runner:
                 self.store.set_status(job, status)
         if now - self.last_progress >= PROGRESS_EVERY:
             self.last_progress = now
-            progress = self.progress(job, now)
-            if progress and progress != status.progress:
-                self.store.set_status(job, status._replace(progress=progress))
+            status = status._replace(progress=self.progress(job, now) or status.progress)
+        if status != self.store.status(job):
+            self.store.set_status(job, status)
 
     def progress(self, job, now):
         """What the job says (PROGRESS: lines, mdrun's ETA); for scripts also how far the GROMACS run it is in now

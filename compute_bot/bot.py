@@ -78,6 +78,17 @@ def files_text(n):
     return f"{n} {'pliki' if few else 'plików'}"
 
 
+def run_notes(status):
+    """" Pauzy 1 h 20 min (laptop stygł), CPU do 83 °C." – how the laptop coped, for the done message."""
+    notes = []
+    if status.paused_s >= 60:
+        notes.append(f"pauzy {duration(status.paused_s)} (laptop stygł)")
+    if status.temp_max is not None:
+        notes.append(f"CPU do {status.temp_max:.0f} °C")
+    text = ", ".join(notes)
+    return f" {text[:1].upper()}{text[1:]}." if notes else ""
+
+
 def size_text(n):
     for unit in ("B", "KB", "MB", "GB"):
         if n < 1024 or unit == "GB":
@@ -127,10 +138,14 @@ class Bot:
         self.restart = False
         fresh = not self.state_path.exists()
         self.local_hour = lambda: time.localtime(self.clock()).tm_hour
-        self.state = {"announced": {}, "reported": {}, "report_hours": 3.0, "drafts": {}, "open_draft": None,
+        self.state = {"announced": {}, "reported": {}, "drafts": {}, "open_draft": None,
                       "quiet": [23, 7], "runner_alert": "", "copy": {"host": None, "to": results.COPY_TO}}
         if not fresh:
             self.state.update(json.loads(self.state_path.read_text()))
+            if "report_hours" in self.state:  # before 0.2.5 the interval lived here; now the panel sets it too
+                if not (store.root / "reports.json").exists():
+                    store.set_report_hours(self.state["report_hours"])
+                del self.state["report_hours"]
         else:  # first start (or lost state): don't repeat news about old jobs
             for job, status in store.statuses().items():
                 if status.state in jobs.FINAL:
@@ -438,11 +453,10 @@ class Bot:
         try:
             hours = max(0.0, float(rest.replace(",", ".")))
         except ValueError:
-            now = self.state["report_hours"]
+            now = self.store.report_hours()
             return self.say(f"Raport „liczy się” {f'co {now:g} h' if now else 'wyłączony'}. Zmiana: /co 2 "
                             "(0 = wyłącz) albo przyciskiem.", keyboard(REPORT_BUTTONS))
-        self.state["report_hours"] = hours
-        self.save()
+        self.store.set_report_hours(hours)
         self.say("🔕 Raporty postępu wyłączone (start, koniec i błędy nadal przychodzą). Włącz: /co 3."
                  if not hours else f"Raport postępu co {hours:g} h.")
 
@@ -693,6 +707,7 @@ class Bot:
     def tick(self):
         now = self.clock()
         changed = False
+        every = self.store.report_hours()
         for job, status in self.store.statuses().items():
             state = "running" if status.pause == "night" else status.state  # night pauses come and go quietly
             key = f"{state}:{status.attempt}"
@@ -702,9 +717,9 @@ class Bot:
                 changed = True
                 self.announce(job, status, before)
                 self.state["reported"][str(job)] = now
-            elif status.state == "running" and self.state["report_hours"] > 0:
+            elif status.state == "running" and every > 0:
                 last = self.state["reported"].get(str(job), now)
-                if now - last >= self.state["report_hours"] * 3600:
+                if now - last >= every * 3600:
                     self.state["reported"][str(job)] = now
                     changed = True
                     elapsed = duration(now - (status.started or now))
@@ -798,7 +813,8 @@ class Bot:
         elif status.state == "paused":
             self.say(f"🌡️ {title}: za gorąco, wstrzymuję do ostygnięcia.")
         elif status.state == "done":
-            self.send_results(job, header=f"✅ {title} gotowe w {duration(status.finished - status.started)}.")
+            self.send_results(job, header=f"✅ {title} gotowe w {duration(status.finished - status.started)}."
+                                          + run_notes(status))
         elif status.state == "failed":
             tail = self.store.log_tail(job, 1500)
             reason = f"\n{esc(status.progress)}" if status.progress else ""
@@ -864,7 +880,7 @@ class Bot:
         else:
             text += ("Pojedynczy plik: <code>/get N ścieżka</code>. Całość jednym poleceniem: ustaw "
                      "<code>/kopia HOST ~/folder</code> (HOST – nazwa laptopa w Tailscale albo alias z ~/.ssh/config).")
-        return text, keyboard([[("🧹 Miejsce na laptopie", f"j:{job}:miejsce")]])
+        return text, keyboard(self.after_copy(job))
 
     # --- copying and disk -------------------------------------------------------------------------------
 
@@ -872,6 +888,12 @@ class Bot:
         settings = self.state["copy"]
         host = settings["host"] or self.ssh_target
         return results.copy_command(host, self.store.work(job), settings["to"], job) if host else ""
+
+    def after_copy(self, job):
+        rows = [[("🧹 Miejsce na laptopie", f"j:{job}:miejsce")]]
+        if self.store.status(job).state in jobs.FINAL:
+            rows.insert(0, [("✅ Skopiowałem – usuń z laptopa", f"j:{job}:usun")])
+        return rows
 
     def copy_command(self, rest):
         """/kopia N: the rsync line for a job; /kopia [HOST] [~/folder]: where it copies from and to."""
@@ -884,7 +906,8 @@ class Bot:
                 return self.say("Nie znam adresu laptopa. Ustaw raz: <code>/kopia HOST ~/folder</code>, np. "
                                 "<code>/kopia vostro ~/md</code> (HOST jak w <code>ssh HOST</code>).")
             return self.say(f"💻 #{job} na komputer – wklej w terminalu (bez checkpointów):\n<code>{esc(line)}</code>\n"
-                            "Kopiuje tylko to, czego jeszcze nie masz, więc można powtarzać.")
+                            "Kopiuje tylko to, czego jeszcze nie masz, więc można powtarzać.",
+                            keyboard(self.after_copy(job)))
         settings = self.state["copy"]
         for word in rest.split():
             if word.startswith(("~", "/", ".")):
@@ -899,25 +922,18 @@ class Bot:
 
     def disk_command(self, _rest=""):
         """What fills the laptop's disk, biggest job first, with buttons to slim or remove finished ones."""
-        sizes = []
-        for job in self.store.ids():
-            files = [(str(p.relative_to(self.store.work(job))), s) for p, s in self.store.outputs(job)]
-            junk = sum(s for rel, s in files if results.is_junk(rel))
-            sizes.append((sum(s for _, s in files), junk, job))
-        sizes.sort(reverse=True)
-        import shutil
+        sizes = actions.disk(self.store)
         disk = shutil.disk_usage(self.store.root)
         lines = [f"💾 Wolne {size_text(disk.free)} z {size_text(disk.total)}; zadania zajmują "
-                 f"{size_text(sum(s for s, _, _ in sizes))}."]
+                 f"{size_text(sum(j['size'] for j in sizes))}."]
         rows = []
-        for total, junk, job in sizes[:10]:
-            status = self.store.status(job)
-            slim = f", do odchudzenia {size_text(junk)}" if junk else ""
-            lines.append(f"{ICONS[status.state]} #{job} {esc(self.store.spec(job).name)} · {size_text(total)}{slim}")
-            if status.state in jobs.FINAL and len(rows) < 5:
+        for j in sizes[:10]:
+            job, slim = j["id"], f", do odchudzenia {size_text(j['junk'])}" if j["junk"] else ""
+            lines.append(f"{ICONS[j['state']]} #{job} {esc(j['name'])} · {size_text(j['size'])}{slim}")
+            if j["state"] in jobs.FINAL and len(rows) < 5:
                 row = [(f"🗑️ #{job}", f"j:{job}:usun")]
-                if junk:
-                    row.insert(0, (f"🧹 #{job} −{size_text(junk)}", f"o:{job}"))
+                if j["junk"]:
+                    row.insert(0, (f"🧹 #{job} −{size_text(j['junk'])}", f"o:{job}"))
                 rows.append(row)
         if len(sizes) > 10:
             lines.append(f"… i {len(sizes) - 10} mniejszych")
@@ -926,15 +942,9 @@ class Bot:
         self.say("\n".join(lines), keyboard(rows) if rows else None)
 
     def slim_confirmed(self, job):
-        if job not in self.store.ids() or self.store.status(job).state not in jobs.FINAL:
-            return self.say(f"#{job} nie jest skończone albo go nie ma.")
-        work = self.store.work(job)
-        freed = 0
-        for path, size in self.store.outputs(job):
-            if results.is_junk(str(path.relative_to(work))):
-                path.unlink()
-                freed += size
-        self.say(f"🧹 #{job}: zwolnione {size_text(freed)}.")
+        if job not in self.store.ids():
+            return self.say(f"Nie ma zadania #{job}.")
+        self.say(f"🧹 #{job}: zwolnione {size_text(actions.slim(self.store, job))}.")
 
     # --- updating itself --------------------------------------------------------------------------------
 

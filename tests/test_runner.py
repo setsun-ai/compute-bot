@@ -303,3 +303,15 @@ def test_a_script_that_hides_mdrun_still_shows_how_far_the_run_is(tmp_path):
     progress = store.status(job).progress
     assert progress.startswith("przebieg 2/30 · ")
     assert "sys/a/nvt" in progress and "20%" in progress and "etap jeszcze ~" in progress
+
+
+def test_the_runner_keeps_the_peak_temperature_and_the_time_spent_paused(tmp_path):
+    temp = Thermometer(95.0)
+    store, runner = make(tmp_path, temp)
+    job = script(store, "sleep 0.3")
+    run_until(runner, store, job, {"paused"})
+    time.sleep(0.5)
+    runner.tick()
+    temp.temp = 60.0
+    status = run_until(runner, store, job, jobs.FINAL)
+    assert status.temp_max == 95.0 and status.paused_s >= 0.4

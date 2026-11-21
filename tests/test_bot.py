@@ -270,8 +270,14 @@ def test_system_info(env):
 def test_report_interval_is_kept(env, tmp_path):
     bot, api, store, clock = env
     bot.handle_update(message("/co 1"))
-    again = Bot(store, api, OWNER, tmp_path / "bot.json", clock=clock, system_info=lambda: "")
-    assert again.state["report_hours"] == 1.0
+    assert jobs.Store(tmp_path).report_hours() == 1.0
+
+
+def test_a_report_interval_from_an_older_version_carries_over(tmp_path):
+    (tmp_path / "bot.json").write_text(json.dumps({"report_hours": 6.0}))
+    store = jobs.Store(tmp_path)
+    Bot(store, FakeApi(), OWNER, tmp_path / "bot.json", clock=Clock(), system_info=lambda: "")
+    assert store.report_hours() == 6.0
 
 
 # --- quality of life ------------------------------------------------------------------------------------
@@ -706,7 +712,7 @@ def test_a_progress_report_carries_buttons_to_space_it_out_or_stop_it(env):
     taps = [b["callback_data"] for b in last_buttons(api)]
     assert {"r:0", "r:6", "r:12"} <= set(taps)
     tap(bot, "r:0")
-    assert bot.state["report_hours"] == 0
+    assert store.report_hours() == 0
     count = len(api.calls)
     clock.now += 24 * 3600
     bot.tick()
@@ -718,7 +724,7 @@ def test_report_setting_alone_shows_it_with_buttons(env):
     bot.handle_update(message("/co"))
     assert "3 h" in api.last_text() and "r:0" in [b["callback_data"] for b in last_buttons(api)]
     tap(bot, "r:6")
-    assert bot.state["report_hours"] == 6
+    assert store.report_hours() == 6
 
 
 # --- many results: the zip keeps what matters, the rest is one rsync away ------------------------------------
@@ -772,3 +778,25 @@ def test_disk_view_lists_jobs_by_size_and_slimming_keeps_the_results(env):
     assert not (work / "md.cpt").exists() and not (work / "#topol.top.1#").exists()
     assert (work / "wyniki/t.csv").exists() and (work / "md.xtc").exists()
     assert "zwolnione" in api.last_text()
+
+
+# --- after copying, and how the job went ---------------------------------------------------------------------
+
+def test_the_copy_message_offers_to_remove_the_job_once_copied(env):
+    bot, api, store, _ = env
+    bot.ssh_target = "student@laptop.example.ts.net"
+    bot.zip_budget = 600_000
+    job = many_results(store)
+    bot.tick()
+    assert f"j:{job}:usun" in [b["callback_data"] for b in last_buttons(api)]
+    bot.handle_update(message(f"/kopia {job}"))
+    assert f"j:{job}:usun" in [b["callback_data"] for b in last_buttons(api)]
+
+
+def test_done_message_says_how_long_it_paused_and_how_hot_it_got(env):
+    bot, api, store, _ = env
+    job = finished_job(store, {"a.csv": b"1"})
+    store.set_status(job, store.status(job)._replace(temp_max=83.4, paused_s=4800.0))
+    bot.tick()
+    text = next(t for t in api.texts() if "gotowe" in t)
+    assert "83 °C" in text and "1 h 20 min" in text

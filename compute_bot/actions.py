@@ -9,7 +9,7 @@ import shutil
 import zipfile
 from pathlib import Path
 
-from . import jobs
+from . import jobs, results
 from .recipes import RECIPES, ParamError
 
 
@@ -56,6 +56,33 @@ def top(store, job):
 
 
 CLOSED = ".closed"  # a card started or discarded in the Mini App; the bot drops it from bot.json on its next tick
+
+
+def disk(store):
+    """Every job by size, biggest first: [{"id", "name", "state", "finished", "size", "junk"}] (junk: what slim
+    would free)."""
+    found = []
+    for spec in store.specs():
+        work = store.work(spec.id)
+        files = [(str(path.relative_to(work)), size) for path, size in store.outputs(spec.id)]
+        status = store.status(spec.id)
+        found.append({"id": spec.id, "name": spec.name, "state": status.state, "finished": status.finished,
+                      "size": sum(size for _, size in files),
+                      "junk": sum(size for rel, size in files if results.is_junk(rel))})
+    return sorted(found, key=lambda job: (-job["size"], job["id"]))
+
+
+def slim(store, job):
+    """Remove a finished job's checkpoints, backups and crash dumps; returns the bytes freed."""
+    if store.status(job).state not in jobs.FINAL:
+        raise ParamError(f"#{job} jeszcze się liczy: odchudzić można dopiero skończone zadanie.")
+    work = store.work(job)
+    freed = 0
+    for path, size in store.outputs(job):
+        if results.is_junk(str(path.relative_to(work))):
+            path.unlink()
+            freed += size
+    return freed
 
 
 def old_finished(store, days, now):

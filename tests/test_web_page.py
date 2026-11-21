@@ -142,15 +142,18 @@ def test_every_api_call_of_the_page_is_routed_by_the_app(app):
         ("POST", "/api/jobs/1/top"), ("POST", "/api/jobs/1/retry"), ("POST", "/api/jobs/1/send"),
         ("POST", "/api/jobs/1/extend"), ("POST", "/api/drafts/777/start"), ("POST", "/api/drafts/777/discard"),
         ("POST", "/api/jobs/1/remove"), ("POST", "/api/cleanup"), ("GET", "/api/guide"),
-        ("POST", "/api/examples/md/draft"), ("POST", "/api/jobs/1/link")}
-    # removing job 1 last, so the other job routes still find it
-    for method, path in sorted(calls, key=lambda c: c[1].endswith("/remove")):
-        url, query = concrete(path)
+        ("POST", "/api/examples/md/draft"), ("POST", "/api/jobs/1/link"), ("POST", "/api/night"),
+        ("POST", "/api/reports"), ("GET", "/api/disk"), ("POST", "/api/jobs/1/slim")}
+    # each route once, removing job 1 last, so the other job routes still find it
+    routes = {(m, concrete(p)[0]): concrete(p)[1] for m, p in calls}
+    for method, url in sorted(routes, key=lambda c: (c[1].endswith("/remove"), c[1])):
+        query = routes[method, url]
         try:
             if method == "GET":
                 app.get(url, query)
             else:
-                app.post(url, {"path": "a.txt", "ns": 1, "on": False, "params": {}, "days": 7})
+                app.post(url, {"path": "a.txt", "ns": 1, "on": False, "params": {}, "days": 7, "cmd": "off",
+                               "hours": 3})
         except LookupError:
             pytest.fail(f"{method} {url} is not routed by web.App")
         except (ParamError, FileExistsError):
